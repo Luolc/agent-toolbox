@@ -90,14 +90,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `run`: the runner can execute this target's binary.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            run: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+            run: true
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -125,10 +128,11 @@ jobs:
       # archive, and the archive has to hold `atb`. On Linux the binary has
       # to be a static ELF, asserted as a positive chain: `readelf -l`
       # succeeds, prints program headers, and those name no interpreter.
-      # The binary is run wherever the runner can execute it.
+      # The binary is run where the runner can execute it (`matrix.run`).
       - name: Check the packaged binary
         env:
           TARGET: ${{ matrix.target }}
+          RUN: ${{ matrix.run == true }}
         run: |
           set -euo pipefail
           shasum -a 256 -c "atb-$TARGET.sha256"
@@ -145,11 +149,10 @@ jobs:
             fi
             echo "static: no INTERP"
           fi
-          host="$(rustc -vV | sed -n 's/^host: //p')"
-          if [ "$host" = "$TARGET" ]; then
+          if [ "$RUN" = true ]; then
             unpacked/atb --version
           else
-            echo "not run: host $host cannot execute $TARGET"
+            echo "not run: this runner cannot execute $TARGET"
           fi
 
   # Trusted Publishing: no long-lived token in CI. The auth action swaps the
