@@ -1,0 +1,63 @@
+# PR check: full-history credential scan, then fmt / clippy / test / doc.
+# The job name `check` is the required status check on main.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the credential scan reads historical commits.
+          fetch-depth: 0
+
+      # pre-commit's gitleaks hook only sees the staged diff; CI has no
+      # staging area, so scan the whole history. Pinned by version and
+      # SHA-256 so a moved tag cannot change what runs. --redact keeps a
+      # hit from printing the secret into the Actions log.
+      - name: Credential scan (gitleaks, full history)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose .
+
+      # rust-toolchain.toml pins the channel and components; rustup installs
+      # them on first use.
+      - name: Rust toolchain
+        run: rustup show
+
+      - name: Rust format
+        run: cargo fmt --check
+
+      - name: Rust lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo test --locked
+
+      - name: Rust docs
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo doc --no-deps --locked

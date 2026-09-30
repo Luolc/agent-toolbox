@@ -1,0 +1,15 @@
+[package]
+name = "agent-toolbox"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.0"
+description = "Command-line tools for running and operating AI coding agents"
+license = "Apache-2.0"
+repository = "https://github.com/Luolc/agent-toolbox"
+publish = false
+
+[[bin]]
+name = "agent-toolbox"
+path = "src/main.rs"
+
+[dependencies]
