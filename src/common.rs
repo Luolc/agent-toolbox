@@ -216,7 +216,15 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 pub fn cli_version(binary: &str) -> Result<String, Error> {
     let cannot_run =
         |why: &dyn fmt::Display| usage(format!("cannot run `{binary} --version`: {why}"));
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    // Whatever answers to this name on PATH must not see a credential passed
+    // to this process, so every variable of this binary's own is withheld.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("ATB_") {
+            command.env_remove(name);
+        }
+    }
+    let mut child = command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

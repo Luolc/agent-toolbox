@@ -301,3 +301,41 @@ fn token_variable_without_its_id_fails_without_reading_any_file() {
         assert!(!message.contains(FAKE_TOKEN), "{message}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn version_probe_child_does_not_inherit_credential_variables() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const VARS: [&str; 5] = [
+        "ATB_CLAUDE_TOKEN",
+        "ATB_CODEX_TOKEN",
+        "ATB_CODEX_ACCOUNT_ID",
+        "ATB_GROK_TOKEN",
+        "ATB_GROK_USER_ID",
+    ];
+    let bin = scratch("version-probe-env");
+    // A stand-in `claude` that records which variables it can see (presence
+    // only) and prints no version, so the run stops before any request.
+    let script = bin.join("claude");
+    let checks: String = VARS
+        .iter()
+        .map(|var| format!("[ -n \"${{{var}+x}}\" ] && echo {var} >> \"$0.seen\"\n"))
+        .collect();
+    fs::write(&script, format!("#!/bin/sh\n: > \"$0.seen\"\n{checks}")).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let token = Path::new(FAKE_TOKEN);
+    let mut env = vec![("PATH", bin.as_path())];
+    env.extend(VARS.iter().map(|var| (*var, token)));
+    let output = atb(&["quota", "claude"], &env);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("cannot parse a version"),
+        "{}",
+        stderr(&output)
+    );
+    // The file exists, so the stand-in ran; it is empty, so it saw none.
+    assert_eq!(fs::read_to_string(bin.join("claude.seen")).unwrap(), "");
+}
