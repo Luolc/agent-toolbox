@@ -98,3 +98,5 @@ The same workflow has a `workflow_dispatch` entry that runs the guard against a 
 ```sh
 gh workflow run release.yml --ref main -f tag=v0.1.0
 ```
+
+GitHub dispatches a workflow only once it exists on the default branch. A pull request that edits `release.yml` runs the build half of the same dry run (all four targets, no guard, since there is no tag to compare).

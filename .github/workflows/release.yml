@@ -23,6 +23,12 @@ on:
         description: "Tag to check against the manifest version (v<major>.<minor>.<patch>)"
         required: true
         type: string
+  # A pull request that edits this file runs the build half of the dry run
+  # (no guard: there is no tag to compare), because `workflow_dispatch`
+  # only works once the file is on the default branch.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
 
 permissions: {}
 
@@ -35,6 +41,7 @@ jobs:
   # has to equal the tag, and anything else stops the run. Every other job
   # needs this one, so a mismatch creates nothing anywhere.
   guard:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -73,11 +80,12 @@ jobs:
   # On a tag push this uploads `atb-<target>.tar.gz` (holding the bare `atb`
   # binary) and `atb-<target>.sha256` to the Release. On a dispatch the
   # upload action runs with `dry-run`, which builds and packages the same
-  # files and uploads nothing; `create-release` is skipped then, hence the
-  # explicit condition instead of plain `needs`.
+  # files and uploads nothing. Outside a tag push `create-release` is
+  # skipped (and on a pull request `guard` too), hence the explicit
+  # condition instead of plain `needs`.
   upload-assets:
     needs: [guard, create-release]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success') }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (needs.guard.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success'))) }}
     strategy:
       fail-fast: false
       matrix:
