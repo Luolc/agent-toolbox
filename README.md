@@ -2,6 +2,14 @@
 
 Command-line tools for running and operating AI coding agents (Claude Code, Codex, Grok Build), built as one Rust binary so a machine gets everything by copying a single file.
 
+## Install
+
+Prebuilt binaries for Linux (static musl, x86_64 and aarch64) and macOS (x86_64 and aarch64) are attached to each [GitHub release](https://github.com/Luolc/agent-toolbox/releases) as `atb-<target>.tar.gz`, with a `.sha256` next to each. Or build from crates.io:
+
+```sh
+cargo install agent-toolbox
+```
+
 ## `atb quota`
 
 ```sh

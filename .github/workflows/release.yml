@@ -1,0 +1,220 @@
+# Release: on a version tag, check the tag against the manifest version,
+# create a GitHub Release, attach the `atb` binary for four targets (fully
+# static musl for Linux, native for macOS) and publish the crate to
+# crates.io through Trusted Publishing. See docs/knowledge/release.md.
+#
+# `ureq` uses rustls with `ring`, which compiles C. The Linux jobs get a
+# musl cross C compiler from setup-cross-toolchain-action; the macOS jobs
+# use the runner's own clang.
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # Dry run; it never releases. It runs the guard against the tag given as
+  # input and builds, packages and checks all four targets, then stops: no
+  # Release, no upload, no publish.
+  workflow_dispatch:
+    inputs:
+      tag:
+        # No default: a default tag goes stale silently, and then "forgot to
+        # fill it in" and "meant that one" look the same.
+        description: "Tag to check against the manifest version (v<major>.<minor>.<patch>)"
+        required: true
+        type: string
+  # A pull request that edits this file runs the build half of the dry run
+  # (no guard: there is no tag to compare), because `workflow_dispatch`
+  # only works once the file is on the default branch.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+
+permissions: {}
+
+jobs:
+  # `cargo publish` uploads whatever `[package].version` says; the tag is
+  # not an input to it. Pushing v0.1.1 at a commit whose manifest reads
+  # 0.2.0 would publish 0.2.0, a version crates.io cannot delete or
+  # overwrite, while the GitHub Release calls itself v0.1.1. So assert
+  # equality first, in the positive form: the version has to be read and
+  # has to equal the tag, and anything else stops the run. Every other job
+  # needs this one, so a mismatch creates nothing anywhere.
+  guard:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Assert the tag matches the manifest version
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -er '.packages[] | select(.name == "agent-toolbox") | .version')"
+          echo "tag=$TAG manifest=v$version"
+          [ "$TAG" = "v$version" ]
+
+  # The body is GitHub's generated notes: one line per pull request merged
+  # since the previous Release, plus the compare link. PR titles are the
+  # squash commit subjects, so that list is the changelog. `--verify-tag`
+  # fails on a missing tag instead of creating one on the default branch.
+  create-release:
+    if: github.event_name == 'push'
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Create the Release with GitHub's generated notes
+        run: gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+
+  # Builds and packages `atb-<target>.tar.gz` (holding the bare `atb`
+  # binary) and `atb-<target>.sha256` on every event, read-only: the upload
+  # action always runs with `dry-run`, and the files leave as a workflow
+  # artifact. Only `upload-assets` below can write to a Release. On a pull
+  # request `guard` is skipped, hence the explicit condition instead of
+  # plain `needs`.
+  build:
+    needs: guard
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.guard.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `run`: the runner can execute this target's binary.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            run: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            run: true
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Linux only: the musl cross toolchain, C compiler included. The apple
+      # targets build natively (upload-rust-binary-action installs the target).
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        if: startsWith(matrix.os, 'ubuntu')
+        with:
+          target: ${{ matrix.target }}
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: atb
+          target: ${{ matrix.target }}
+          tar: unix
+          checksum: sha256
+          locked: true
+          dry-run: true
+          dry-run-intended: true
+      # Checks the files that get uploaded, not the build directory: the
+      # sidecar has to match the archive, and the archive has to hold `atb`.
+      # On Linux the binary has to be a static ELF, asserted as a positive
+      # chain: `readelf -l` succeeds, prints program headers, and those name
+      # no interpreter.
+      # The binary is run where the runner can execute it (`matrix.run`).
+      - name: Check the packaged binary
+        env:
+          TARGET: ${{ matrix.target }}
+          RUN: ${{ matrix.run == true }}
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c "atb-$TARGET.sha256"
+          mkdir unpacked
+          tar -xzf "atb-$TARGET.tar.gz" -C unpacked
+          [ "$(ls unpacked)" = atb ]
+          if [ "$RUNNER_OS" = Linux ]; then
+            headers="$(readelf -l unpacked/atb)"
+            grep -q 'Program Headers' <<<"$headers"
+            # `! grep` would not trip `set -e`; fail explicitly.
+            if grep -q INTERP <<<"$headers"; then
+              echo "dynamic: INTERP present" >&2
+              exit 1
+            fi
+            echo "static: no INTERP"
+          fi
+          if [ "$RUN" = true ]; then
+            unpacked/atb --version
+          else
+            echo "not run: this runner cannot execute $TARGET"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: atb-${{ matrix.target }}
+          path: |
+            atb-${{ matrix.target }}.tar.gz
+            atb-${{ matrix.target }}.sha256
+          if-no-files-found: error
+
+  # Tag push only: attaches the eight files `build` checked to the Release.
+  # Plain `needs` means all four builds and `create-release` succeeded.
+  upload-assets:
+    if: github.event_name == 'push'
+    needs: [build, create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: atb-*
+          path: assets
+          merge-multiple: true
+      - name: Upload the archives and checksums to the Release
+        run: |
+          set -euo pipefail
+          files=(assets/atb-*.tar.gz assets/atb-*.sha256)
+          printf '%s\n' "${files[@]}"
+          [ "${#files[@]}" -eq 8 ]
+          gh release upload "$TAG" "${files[@]}"
+
+  # Trusted Publishing: no long-lived token in CI. The auth action swaps the
+  # job's OIDC identity for a short-lived crates.io token and revokes it in
+  # its post step. No `environment:`: the repository has none, so the
+  # Trusted Publisher's environment field stays empty.
+  #
+  # The first run of this job, on v0.1.0, is expected to fail. Trusted
+  # Publishing can only be configured once the crate exists, so 0.1.0 is
+  # published by hand with an API token first (docs/knowledge/release.md),
+  # and until the Trusted Publisher is set up the OIDC exchange is refused;
+  # after the manual publish, `cargo publish` of 0.1.0 would be refused as
+  # well. From the next version on, this job is the publish path.
+  publish:
+    if: github.event_name == 'push'
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      # `id-token: write` is the permission crates.io asks for; `contents:
+      # read` is for the checkout, since job-level permissions zero out
+      # everything unlisted.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
