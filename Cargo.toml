@@ -9,7 +9,15 @@ repository = "https://github.com/Luolc/agent-toolbox"
 publish = false
 
 [[bin]]
-name = "agent-toolbox"
+name = "atb"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+gethostname = "1.1.0"
+os_info = { version = "3.15.0", default-features = false }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
