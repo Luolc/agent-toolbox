@@ -173,47 +173,63 @@ fn window_entry(slot: &str, used_percent: Value, minutes: Value, resets_at: &Val
 /// window's length in seconds is rounded up to minutes, and credits keep the
 /// three fields the rollout snapshot has. Account and user ids in the
 /// response are dropped.
+///
+/// A body that is not the payload upstream decodes is an error, so the caller
+/// falls back instead of reporting an empty quota: `plan_type` is required,
+/// and `rate_limit`, its windows and `credits` may be absent or null but must
+/// otherwise have the fields upstream requires of them.
 fn usage_fields(payload: &Value) -> Result<Vec<(&'static str, Value)>, Error> {
-    if !payload.is_object() {
-        return Err(usage("unexpected /wham/usage response shape"));
-    }
+    let bad = || usage("unexpected /wham/usage response shape");
+    // An optional object: absent and null are both "not there".
+    let optional = |parent: &Value, key: &str| match parent.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(object @ Value::Object(_)) => Ok(Some(object.clone())),
+        Some(_) => Err(bad()),
+    };
+    let plan_type = payload.get("plan_type").filter(|plan| plan.is_string());
+    let plan_type = plan_type.ok_or_else(bad)?.clone();
+
     let mut windows = Map::new();
-    for (slot, key) in [
-        ("primary", "primary_window"),
-        ("secondary", "secondary_window"),
-    ] {
-        let Some(window @ Value::Object(_)) = payload.get("rate_limit").and_then(|r| r.get(key))
-        else {
-            continue;
-        };
-        let used_percent = match window.get("used_percent").and_then(Value::as_f64) {
-            Some(percent) => percent.into(),
-            None => get(window, "used_percent"),
-        };
-        let minutes = match window.get("limit_window_seconds").and_then(Value::as_i64) {
-            Some(seconds) if seconds > 0 => Value::from((seconds + 59) / 60),
-            _ => Value::Null,
-        };
-        let entry = window_entry(
-            slot,
-            used_percent,
-            minutes.clone(),
-            &get(window, "reset_at"),
-        );
-        windows.insert(window_name(&minutes), entry);
+    if let Some(rate_limit) = optional(payload, "rate_limit")? {
+        for (slot, key) in [
+            ("primary", "primary_window"),
+            ("secondary", "secondary_window"),
+        ] {
+            let Some(window) = optional(&rate_limit, key)? else {
+                continue;
+            };
+            let number = |name: &str| window.get(name).filter(|value| value.is_number());
+            let used_percent = number("used_percent").and_then(Value::as_f64);
+            let seconds = number("limit_window_seconds").and_then(Value::as_i64);
+            let reset_at = number("reset_at").ok_or_else(bad)?;
+            let minutes = match seconds.ok_or_else(bad)? {
+                seconds if seconds > 0 => Value::from((seconds + 59) / 60),
+                _ => Value::Null,
+            };
+            let used_percent = used_percent.ok_or_else(bad)?.into();
+            let entry = window_entry(slot, used_percent, minutes.clone(), reset_at);
+            windows.insert(window_name(&minutes), entry);
+        }
     }
-    let credits = match payload.get("credits") {
-        Some(credits @ Value::Object(_)) => {
+    let credits = match optional(payload, "credits")? {
+        Some(credits) => {
+            let flag = |name: &str| credits.get(name).filter(|value| value.is_boolean());
             let mut kept = Map::new();
-            for key in ["has_credits", "unlimited", "balance"] {
-                kept.insert(key.into(), get(credits, key));
-            }
+            kept.insert(
+                "has_credits".into(),
+                flag("has_credits").ok_or_else(bad)?.clone(),
+            );
+            kept.insert(
+                "unlimited".into(),
+                flag("unlimited").ok_or_else(bad)?.clone(),
+            );
+            kept.insert("balance".into(), get(&credits, "balance"));
             kept.into()
         }
-        _ => Value::Null,
+        None => Value::Null,
     };
     Ok(vec![
-        ("plan_type", get(payload, "plan_type")),
+        ("plan_type", plan_type),
         ("limit_id", "codex".into()),
         ("windows", windows.into()),
         ("credits", credits),
@@ -500,6 +516,24 @@ mod tests {
         let fields = object(usage_fields(&payload).unwrap());
         assert_eq!(fields["windows"]["window_1440m"]["window_minutes"], 1440);
         assert_eq!(fields["credits"], Value::Null);
+    }
+
+    #[test]
+    fn usage_response_of_another_shape_is_rejected() {
+        // A 2xx body that is JSON but not the usage payload must not pass as
+        // an empty quota; the error is what sends the caller to the fallback.
+        for payload in [
+            json!({}),
+            json!({"plan_type": "pro", "rate_limit": "none"}),
+            json!({"plan_type": "pro", "rate_limit": {"primary_window": {"used_percent": 1}}}),
+            json!({"plan_type": "pro", "credits": {"has_credits": "yes", "unlimited": false}}),
+        ] {
+            assert!(usage_fields(&payload).is_err(), "{payload}");
+        }
+        // The optional parts may be null or absent.
+        let minimal = json!({"plan_type": "pro", "rate_limit": null});
+        let fields = object(usage_fields(&minimal).unwrap());
+        assert_eq!(fields["windows"], json!({}));
     }
 
     #[test]
