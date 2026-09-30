@@ -10,9 +10,13 @@ Short name `atb`; the resident orchestra is `atb-orchestra`.
 
 One Rust binary with subcommands, each a self-contained tool. A tool reads local files or makes single HTTP calls; no daemons, no retry loops, no polling inside this binary. Anything that must run continuously lives in the consuming repository as a scheduled job that calls this binary.
 
+## Command tree
+
+Tool first, target harness second: `atb <tool> <harness>`, with the harness (`claude`, `codex` or `grok`) as a positional argument, as in `atb quota codex`. The binary is `atb`; `agent-toolbox` stays the repository and crate name.
+
 ## Credentials
 
-Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json`) only to build request headers. A token value never appears in output, logs, error messages or test fixtures; tests use synthetic files under a temporary home. All home-directory paths must be overridable through an environment variable so tests never touch the real home.
+Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json`) only to build request headers. A token value never appears in output, logs, error messages or test fixtures; tests use synthetic files under a temporary home. Every credential location must be overridable (`--config-dir`, the harness's own variable, `ATB_HOME`; the README lists the precedence) so tests never touch the real home. A token may also be passed directly, only through an environment variable, never a flag.
 
 ## Quality checks and merging
 
