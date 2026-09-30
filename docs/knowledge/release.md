@@ -63,7 +63,7 @@ For v0.1.0 the `publish` job is expected to fail, because 0.1.0 is already on cr
 gh run watch --exit-status "$(gh run list --workflow=release.yml --event=push --limit=1 --json databaseId --jq '.[0].databaseId')"
 ```
 
-Done when it exits 0 (on v0.1.0: every job but `publish` succeeded). If a job failed and was re-run, `gh run list` shows only the last attempt; read `gh api repos/Luolc/agent-toolbox/actions/runs/<id> --jq .run_attempt` before calling the run green.
+Done when it exits 0. On v0.1.0 it exits non-zero because `publish` fails (section 4); there, done when `gh run view <id> --json jobs --jq '.jobs[] | "\(.name): \(.conclusion)"'` shows `success` for every job except `publish`. If a job failed and was re-run, `gh run list` shows only the last attempt; read `gh api repos/Luolc/agent-toolbox/actions/runs/<id> --jq .run_attempt` before calling the run green.
 
 ## 6. Verify the assets
 

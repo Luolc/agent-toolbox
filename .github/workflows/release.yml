@@ -77,15 +77,15 @@ jobs:
       - name: Create the Release with GitHub's generated notes
         run: gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
 
-  # On a tag push this uploads `atb-<target>.tar.gz` (holding the bare `atb`
-  # binary) and `atb-<target>.sha256` to the Release. On a dispatch the
-  # upload action runs with `dry-run`, which builds and packages the same
-  # files and uploads nothing. Outside a tag push `create-release` is
-  # skipped (and on a pull request `guard` too), hence the explicit
-  # condition instead of plain `needs`.
-  upload-assets:
-    needs: [guard, create-release]
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (needs.guard.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.create-release.result == 'success'))) }}
+  # Builds and packages `atb-<target>.tar.gz` (holding the bare `atb`
+  # binary) and `atb-<target>.sha256` on every event, read-only: the upload
+  # action always runs with `dry-run`, and the files leave as a workflow
+  # artifact. Only `upload-assets` below can write to a Release. On a pull
+  # request `guard` is skipped, hence the explicit condition instead of
+  # plain `needs`.
+  build:
+    needs: guard
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.guard.result == 'success') }}
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +103,7 @@ jobs:
             run: true
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -121,13 +121,13 @@ jobs:
           tar: unix
           checksum: sha256
           locked: true
-          dry-run: ${{ github.event_name != 'push' }}
-          token: ${{ github.token }}
-      # Checks the files that were (or on a dispatch would have been)
-      # uploaded, not the build directory: the sidecar has to match the
-      # archive, and the archive has to hold `atb`. On Linux the binary has
-      # to be a static ELF, asserted as a positive chain: `readelf -l`
-      # succeeds, prints program headers, and those name no interpreter.
+          dry-run: true
+          dry-run-intended: true
+      # Checks the files that get uploaded, not the build directory: the
+      # sidecar has to match the archive, and the archive has to hold `atb`.
+      # On Linux the binary has to be a static ELF, asserted as a positive
+      # chain: `readelf -l` succeeds, prints program headers, and those name
+      # no interpreter.
       # The binary is run where the runner can execute it (`matrix.run`).
       - name: Check the packaged binary
         env:
@@ -154,6 +154,39 @@ jobs:
           else
             echo "not run: this runner cannot execute $TARGET"
           fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: atb-${{ matrix.target }}
+          path: |
+            atb-${{ matrix.target }}.tar.gz
+            atb-${{ matrix.target }}.sha256
+          if-no-files-found: error
+
+  # Tag push only: attaches the eight files `build` checked to the Release.
+  # Plain `needs` means all four builds and `create-release` succeeded.
+  upload-assets:
+    if: github.event_name == 'push'
+    needs: [build, create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: atb-*
+          path: assets
+          merge-multiple: true
+      - name: Upload the archives and checksums to the Release
+        run: |
+          set -euo pipefail
+          files=(assets/atb-*.tar.gz assets/atb-*.sha256)
+          printf '%s\n' "${files[@]}"
+          [ "${#files[@]}" -eq 8 ]
+          gh release upload "$TAG" "${files[@]}"
 
   # Trusted Publishing: no long-lived token in CI. The auth action swaps the
   # job's OIDC identity for a short-lived crates.io token and revokes it in
