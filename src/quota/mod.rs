@@ -25,6 +25,11 @@ Credential sources, highest first:
 An empty variable counts as unset. The Codex rollout fallback reads sessions/
 under the directory that 2 to 5 resolve to.
 
+Proxy: every request honours the standard proxy variables. The first valid one
+of ALL_PROXY, HTTPS_PROXY, HTTP_PROXY wins (lowercase spellings are accepted
+too); NO_PROXY lists hosts that bypass it. An HTTP CONNECT proxy is what has
+been tested.
+
 Exit status: 0 on success, 1 on error, 2 when the endpoint answers 429 (the
 retry-after value is printed; nothing is retried).";
 
