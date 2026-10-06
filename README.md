@@ -45,6 +45,10 @@ Highest first:
 
 An empty variable counts as unset. The Codex fallback reads `sessions/` under the directory that 2 to 5 resolve to. Records that used a credential say where it came from in `credential_source`: `env`, or the path of the file. A token value is only ever used to build the `Authorization` header; it never appears in output or in an error message. The `--version` child process is started without any `ATB_*` variable, so a token passed in the environment does not reach it.
 
+### Proxy
+
+Every request honours the standard proxy variables. The first valid one of `ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` wins, in that order, and the lowercase spellings are accepted too. `NO_PROXY` lists the hosts that bypass the proxy. An HTTP `CONNECT` proxy is what has been tested.
+
 ## Build
 
 ```sh
