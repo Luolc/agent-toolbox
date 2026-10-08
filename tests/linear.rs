@@ -37,6 +37,9 @@ struct State {
     /// From this many requests on, every key gets a 401.
     revoke_after: usize,
     requests: Vec<Request>,
+    /// The team's workflow states as (id, name, type, position).
+    states: Vec<(String, String, String, f64)>,
+    /// The name of the issue's state.
     issue_state: String,
     /// (id, createdAt, body)
     comments: Vec<(String, String, String)>,
@@ -55,15 +58,25 @@ impl State {
         id
     }
 
+    /// Replace the team's states; ids are `s-<name>`.
+    fn set_states(&mut self, states: &[(&str, &str, f64)]) {
+        self.states = states
+            .iter()
+            .map(|(name, kind, position)| {
+                (
+                    format!("s-{name}"),
+                    (*name).to_owned(),
+                    (*kind).to_owned(),
+                    *position,
+                )
+            })
+            .collect();
+    }
+
     fn answer(&mut self, query: &str, vars: &Value) -> Value {
-        let state_names = [
-            ("s-todo", "Todo"),
-            ("s-prog", "In Progress"),
-            ("s-done", "Done"),
-        ];
         if query.contains("issueUpdate") {
-            let (_, name) = state_names.iter().find(|(id, _)| vars["s"] == *id).unwrap();
-            self.issue_state = (*name).to_owned();
+            let state = self.states.iter().find(|s| vars["s"] == s.0).unwrap();
+            self.issue_state = state.1.clone();
             json!({"issueUpdate": {"success": true}})
         } else if query.contains("commentCreate") {
             let id = self.add_comment(vars["b"].as_str().unwrap());
@@ -114,11 +127,15 @@ impl State {
             };
             json!({"team": {"projects": {"nodes": nodes}}})
         } else if query.contains("issue(") {
-            let states: Vec<Value> = state_names
+            let states: Vec<Value> = self
+                .states
                 .iter()
-                .map(|(id, name)| json!({"id": id, "name": name}))
+                .map(|(id, name, kind, position)| {
+                    json!({"id": id, "name": name, "type": kind, "position": position})
+                })
                 .collect();
             json!({"issue": {"id": "i-1", "identifier": ISSUE,
+                "state": {"name": self.issue_state},
                 "team": {"states": {"nodes": states}}}})
         } else if query.contains("viewer") {
             json!({"viewer": {"id": self.viewer_id}})
@@ -131,29 +148,51 @@ impl State {
 struct Fake {
     url: String,
     state: Arc<Mutex<State>>,
+    /// `ATB_HOME` for runs against this server, so no test reads the real
+    /// `~/.config/linear/config.json`.
+    home: PathBuf,
 }
 
 impl Fake {
     fn start(accepted: &[&str]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/graphql", listener.local_addr().unwrap());
-        let state = Arc::new(Mutex::new(State {
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/graphql");
+        let mut state = State {
             accepted: accepted.iter().map(|k| (*k).to_owned()).collect(),
             revoke_after: usize::MAX,
             requests: Vec::new(),
+            states: Vec::new(),
             issue_state: "Todo".into(),
             comments: Vec::new(),
             labels: Vec::new(),
             created: Vec::new(),
             viewer_id: "u-1".into(),
-        }));
+        };
+        state.set_states(&[
+            ("Backlog", "backlog", 0.0),
+            ("Todo", "unstarted", 1.0),
+            ("In Progress", "started", 2.0),
+            ("Done", "completed", 3.0),
+            ("Canceled", "canceled", 4.0),
+        ]);
+        let state = Arc::new(Mutex::new(state));
         let shared = Arc::clone(&state);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 serve(stream.unwrap(), &shared);
             }
         });
-        Self { url, state }
+        let home = scratch(&format!("home-{port}"));
+        Self { url, state, home }
+    }
+
+    fn write_config(&self, text: &str) -> PathBuf {
+        let dir = self.home.join(".config/linear");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, text).unwrap();
+        path
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -275,8 +314,18 @@ fn linear(fake: &Fake, args: &[&str]) -> Output {
     all.extend_from_slice(args);
     atb(
         &all,
-        &[("LINEAR_API_URL", &fake.url), ("LINEAR_API_KEY", KEY)],
+        &[
+            ("LINEAR_API_URL", &fake.url),
+            ("LINEAR_API_KEY", KEY),
+            ("ATB_HOME", fake.home.to_str().unwrap()),
+        ],
     )
+}
+
+fn release(fake: &Fake, extra: &[&str]) -> Output {
+    let mut args = vec!["release", ISSUE, "--agent", "agent-a"];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
 }
 
 fn claim(fake: &Fake, agent: &str) -> Output {
@@ -296,7 +345,7 @@ fn claim(fake: &Fake, agent: &str) -> Output {
 }
 
 #[test]
-fn claim_sets_in_progress_and_writes_both_lines() {
+fn claim_sets_the_started_state_and_writes_three_lines() {
     let fake = Fake::start(&[KEY]);
     let output = claim(&fake, "agent-a");
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -304,9 +353,135 @@ fn claim_sets_in_progress_and_writes_both_lines() {
     assert_eq!(fake.state().issue_state, "In Progress");
     assert_eq!(
         fake.comment_bodies(),
-        ["claim: agent-a thread-1\nscope: repo: src/"]
+        ["claim: agent-a thread-1\nscope: repo: src/\nfrom: Todo"]
     );
     assert!(fake.state().requests.iter().all(|r| r.auth == KEY));
+}
+
+#[test]
+fn claim_picks_the_started_state_with_the_lowest_position_then_name() {
+    let fake = Fake::start(&[KEY]);
+    // List order would pick Review; position alone would pick Working.
+    fake.state().set_states(&[
+        ("Todo", "unstarted", 0.0),
+        ("Review", "started", 3.0),
+        ("Working", "started", 1.0),
+        ("Doing", "started", 1.0),
+    ]);
+    let output = claim(&fake, "agent-a");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "Doing");
+}
+
+#[test]
+fn a_config_override_names_the_state_and_a_missing_one_is_an_error() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().set_states(&[
+        ("Todo", "unstarted", 0.0),
+        ("In Progress", "started", 1.0),
+        ("Active", "started", 2.0),
+    ]);
+    fake.write_config(r#"{"states": {"started": "Active"}}"#);
+    let output = claim(&fake, "agent-a");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "Active");
+
+    let fake = Fake::start(&[KEY]);
+    fake.write_config(r#"{"states": {"started": "Active"}}"#);
+    let output = claim(&fake, "agent-a");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("started") && err.contains("\"Active\""),
+        "{err}"
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn a_malformed_config_is_an_error_naming_the_path_without_its_content() {
+    let fake = Fake::start(&[KEY]);
+    let path = fake.write_config(r#"{"states": {"started": distinctive-config-text"#);
+    let output = claim(&fake, "agent-a");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains(path.to_str().unwrap()), "{err}");
+    assert!(!err.contains("distinctive-config-text"), "{err}");
+    assert!(fake.state().requests.is_empty());
+}
+
+#[test]
+fn release_restores_the_state_recorded_by_claim() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().issue_state = "Backlog".into();
+    let output = claim(&fake, "agent-a");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "In Progress");
+    let output = release(&fake, &["--reason", "blocked"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "Backlog");
+}
+
+#[test]
+fn release_falls_back_to_the_first_unstarted_then_the_first_backlog_state() {
+    // A 0.2.0 claim, without a `from:` line.
+    let fake = Fake::start(&[KEY]);
+    fake.state().set_states(&[
+        ("Backlog", "backlog", 0.0),
+        ("Later", "unstarted", 5.0),
+        ("Ready", "unstarted", 1.0),
+        ("In Progress", "started", 2.0),
+    ]);
+    fake.state().issue_state = "In Progress".into();
+    fake.state()
+        .add_comment("claim: agent-a thread-1\nscope: repo: src/");
+    let output = release(&fake, &["--reason", "blocked"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "Ready");
+
+    // The recorded state is gone and so is every unstarted state.
+    let fake = Fake::start(&[KEY]);
+    fake.state().set_states(&[
+        ("Icebox", "backlog", 4.0),
+        ("Backlog", "backlog", 0.0),
+        ("In Progress", "started", 2.0),
+    ]);
+    fake.state().issue_state = "In Progress".into();
+    fake.state()
+        .add_comment("claim: agent-a thread-1\nscope: repo: src/\nfrom: Todo");
+    let output = release(&fake, &["--reason", "blocked"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "Backlog");
+}
+
+#[test]
+fn the_unstarted_fallback_honours_the_config_override() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().set_states(&[
+        ("Todo", "unstarted", 0.0),
+        ("Ready", "unstarted", 1.0),
+        ("In Progress", "started", 2.0),
+    ]);
+    fake.write_config(r#"{"states": {"unstarted": "Ready"}}"#);
+    fake.state().issue_state = "In Progress".into();
+    fake.state().add_comment("claim: agent-a thread-1");
+    let output = release(&fake, &["--reason", "blocked"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "Ready");
+}
+
+#[test]
+fn release_without_a_state_to_restore_writes_the_comment_then_fails() {
+    let fake = Fake::start(&[KEY]);
+    fake.state()
+        .set_states(&[("In Progress", "started", 0.0), ("Done", "completed", 1.0)]);
+    fake.state().issue_state = "In Progress".into();
+    fake.state().add_comment("claim: agent-a thread-1");
+    let output = release(&fake, &["--reason", "blocked"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("fall back"), "{}", stderr(&output));
+    assert_eq!(fake.comment_bodies()[1], "release: agent-a blocked");
+    assert_eq!(fake.first("issueUpdate"), None);
 }
 
 #[test]
@@ -367,8 +542,13 @@ fn release_by_a_non_holder_or_without_a_holder_changes_nothing() {
 }
 
 #[test]
-fn release_by_the_holder_comments_then_sets_done() {
+fn release_by_the_holder_comments_then_sets_the_first_completed_state() {
     let fake = Fake::start(&[KEY]);
+    fake.state().set_states(&[
+        ("Todo", "unstarted", 0.0),
+        ("Shipped", "completed", 9.0),
+        ("Done", "completed", 3.0),
+    ]);
     fake.state().add_comment("claim: agent-a thread-1");
     let output = linear(
         &fake,
@@ -383,27 +563,18 @@ fn release_by_the_holder_comments_then_sets_done() {
 }
 
 #[test]
-fn forced_release_names_the_holder_and_leaves_the_state_without_a_flag() {
+fn forced_release_names_the_holder_and_restores_the_state_with_the_deprecated_todo() {
     let fake = Fake::start(&[KEY]);
-    fake.state().add_comment("claim: agent-b thread-2");
-    let output = linear(
-        &fake,
-        &[
-            "release",
-            ISSUE,
-            "--agent",
-            "agent-a",
-            "--force",
-            "stale for three days",
-        ],
-    );
+    fake.state().issue_state = "In Progress".into();
+    fake.state()
+        .add_comment("claim: agent-b thread-2\nscope: repo: src/\nfrom: Backlog");
+    let output = release(&fake, &["--force", "stale for three days", "--todo"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         fake.comment_bodies()[1],
         "release: agent-b forced by agent-a: stale for three days"
     );
-    assert_eq!(fake.state().issue_state, "Todo");
-    assert_eq!(fake.first("issueUpdate"), None);
+    assert_eq!(fake.state().issue_state, "Backlog");
 }
 
 /// A key command that records each run in `counter` and prints `key_file`.

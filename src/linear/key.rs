@@ -131,14 +131,9 @@ fn mask(candidates: &[&str], text: &str) -> String {
         .fold(text.to_owned(), |text, c| text.replace(c, "***"))
 }
 
-/// `$XDG_CONFIG_HOME/linear/api-key`, else `<home>/.config/linear/api-key`
-/// with the home that `ATB_HOME` overrides.
+/// `api-key` in the directory the config file shares.
 fn cache_path(ctx: &Context) -> Result<PathBuf, Error> {
-    let config = match ctx.var("XDG_CONFIG_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => ctx.home()?.join(".config"),
-    };
-    Ok(config.join("linear").join("api-key"))
+    Ok(super::config_dir(ctx)?.join("api-key"))
 }
 
 /// The cached key if the file is younger than 24 hours and not empty. Any
