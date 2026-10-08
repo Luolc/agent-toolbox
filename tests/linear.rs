@@ -365,10 +365,10 @@ fn claim_sets_the_started_state_and_writes_three_lines() {
 #[test]
 fn claim_picks_the_started_state_with_the_lowest_position_then_name() {
     let fake = Fake::start(&[KEY]);
-    // List order would pick Review; position alone would pick Working.
+    // List or name order would pick Alpha; position alone would pick Working.
     fake.state().set_states(&[
         ("Todo", "unstarted", 0.0),
-        ("Review", "started", 3.0),
+        ("Alpha", "started", 3.0),
         ("Working", "started", 1.0),
         ("Doing", "started", 1.0),
     ]);
@@ -446,7 +446,7 @@ fn release_falls_back_to_the_first_unstarted_then_the_first_backlog_state() {
     // The recorded state is gone and so is every unstarted state.
     let fake = Fake::start(&[KEY]);
     fake.state().set_states(&[
-        ("Icebox", "backlog", 4.0),
+        ("Archive", "backlog", 4.0),
         ("Backlog", "backlog", 0.0),
         ("In Progress", "started", 2.0),
     ]);
@@ -550,7 +550,7 @@ fn release_by_the_holder_comments_then_sets_the_first_completed_state() {
     let fake = Fake::start(&[KEY]);
     fake.state().set_states(&[
         ("Todo", "unstarted", 0.0),
-        ("Shipped", "completed", 9.0),
+        ("Closed", "completed", 9.0),
         ("Done", "completed", 3.0),
     ]);
     fake.state().add_comment("claim: agent-a thread-1");
