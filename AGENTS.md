@@ -21,5 +21,6 @@ Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth
 ## Quality checks and merging
 
 - Local: `pre-commit run --all-files` (gitleaks on the staged diff, `cargo fmt --check`); run `pre-commit install` once after cloning. Before pushing also run `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`.
+- After `cargo publish --dry-run`, `cargo test` can run a stale binary and miss source edits. Run `cargo clean -p agent-toolbox` before mutation runs and before any test run that follows a publish dry run.
 - CI: `.github/workflows/ci.yml`, job `check`: full-history gitleaks scan, `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, `cargo doc` with warnings denied. `check` is the required status check on `main`.
 - Reviewers also load `.agents/skills/atb-pr-review`.
