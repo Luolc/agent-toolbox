@@ -8,15 +8,15 @@ Short name `atb`; the resident orchestra is `atb-orchestra`.
 
 ## Scope
 
-One Rust binary with subcommands, each a self-contained tool. A tool reads local files or makes single HTTP calls; no daemons, no retry loops, no polling inside this binary. Anything that must run continuously lives in the consuming repository as a scheduled job that calls this binary.
+One Rust binary with subcommands, each a self-contained tool. A command reads local files or makes a fixed, bounded set of HTTP calls (comment pagination counts as bounded, by the server's `hasNextPage`); no daemons, no retry loops, no polling inside this binary. The one exception is `atb linear`: on a 401 with a key from `LINEAR_API_KEY_CMD` it fetches the key once more and retries that request once. Anything that must run continuously lives in the consuming repository as a scheduled job that calls this binary.
 
 ## Command tree
 
-Tool first, target harness second: `atb <tool> <harness>`, with the harness (`claude`, `codex` or `grok`) as a positional argument, as in `atb quota codex`. The binary is `atb`; `agent-toolbox` stays the repository and crate name.
+Tool first, target harness second: `atb <tool> <harness>`, with the harness (`claude`, `codex` or `grok`) as a positional argument, as in `atb quota codex`. A tool that targets no harness takes its own subcommands, as in `atb linear claim`. The binary is `atb`; `agent-toolbox` stays the repository and crate name.
 
 ## Credentials
 
-Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json`) only to build request headers. A token value never appears in output, logs, error messages or test fixtures; tests use synthetic files under a temporary home. Every credential location must be overridable (`--config-dir`, the harness's own variable, `ATB_HOME`; the README lists the precedence) so tests never touch the real home. A token may also be passed directly, only through an environment variable, never a flag.
+Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json`) only to build request headers. A token value never appears in output, logs, error messages or test fixtures; tests use synthetic files under a temporary home. Every credential location must be overridable (`--config-dir`, the harness's own variable, `ATB_HOME`; the README lists the precedence) so tests never touch the real home. A token may also be passed directly, only through an environment variable, never a flag. The Linear key comes from `LINEAR_API_KEY`, or from the output of the command in `LINEAR_API_KEY_CMD`, cached for 24 hours in `$XDG_CONFIG_HOME/linear/api-key` (mode 0600, directory 0700); the command's stderr is never shown.
 
 ## Quality checks and merging
 

@@ -7,7 +7,8 @@
 //!   It is never printed and never part of an error or of `Debug` output.
 //! - Every credential location is resolved by [`Context`], so a test can
 //!   point it at a synthetic directory and never touches the real home.
-//! - [`http_get_json`] issues exactly one request: no retry, no polling.
+//! - [`http_get_json`] and [`http_post_json`] issue exactly one request: no
+//!   retry, no polling.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -130,7 +131,7 @@ impl Context {
     }
 
     /// An environment variable; an empty value counts as unset.
-    fn var(&self, name: &str) -> Option<OsString> {
+    pub fn var(&self, name: &str) -> Option<OsString> {
         (self.env)(name).filter(|value| !value.is_empty())
     }
 
@@ -144,13 +145,16 @@ impl Context {
         if let Some(dir) = self.var(harness.dir_var()) {
             return Ok(PathBuf::from(dir));
         }
-        let home = match self.var("ATB_HOME") {
-            Some(dir) => PathBuf::from(dir),
-            None => std::env::home_dir().ok_or_else(|| {
-                usage("cannot determine the home directory; pass --config-dir or set ATB_HOME")
-            })?,
-        };
-        Ok(home.join(harness.dir_name()))
+        Ok(self.home()?.join(harness.dir_name()))
+    }
+
+    /// `ATB_HOME` as a whole-home override, then the default home.
+    pub fn home(&self) -> Result<PathBuf, Error> {
+        match self.var("ATB_HOME") {
+            Some(dir) => Ok(PathBuf::from(dir)),
+            None => std::env::home_dir()
+                .ok_or_else(|| usage("cannot determine the home directory; set ATB_HOME")),
+        }
     }
 
     /// A credential passed directly in the environment.
@@ -296,20 +300,32 @@ fn find_version(text: &str) -> Option<&str> {
     })
 }
 
-/// Issue exactly one GET and decode the JSON body. No retry loop, ever.
-///
-/// Redirects are not followed, so the headers never travel to another host.
-/// Error messages carry the URL and the status, never a header or the body.
-pub fn http_get_json(url: &str, headers: &Headers, timeout: Duration) -> Result<Value, Error> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+/// An agent that never follows a redirect, so the headers never travel to
+/// another host, and that hands every status back to the caller.
+fn http_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .max_redirects(0)
         .max_redirects_will_error(false)
         .accept(ureq::config::AutoHeaderValue::None)
         .build()
-        .into();
-    let mut request = agent.get(url);
+        .into()
+}
+
+fn retry_after<B>(response: &ureq::http::Response<B>) -> Option<String> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// Issue exactly one GET and decode the JSON body. No retry loop, ever.
+///
+/// Error messages carry the URL and the status, never a header or the body.
+pub fn http_get_json(url: &str, headers: &Headers, timeout: Duration) -> Result<Value, Error> {
+    let mut request = http_agent(timeout).get(url);
     for (name, value) in &headers.0 {
         request = request.header(*name, value);
     }
@@ -318,12 +334,9 @@ pub fn http_get_json(url: &str, headers: &Headers, timeout: Duration) -> Result<
         .map_err(|err| usage(format!("cannot reach {url}: {err}")))?;
     let status = response.status();
     if status.as_u16() == 429 {
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        return Err(Error::RateLimited { retry_after });
+        return Err(Error::RateLimited {
+            retry_after: retry_after(&response),
+        });
     }
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -337,6 +350,41 @@ pub fn http_get_json(url: &str, headers: &Headers, timeout: Duration) -> Result<
         .read_to_string()
         .map_err(|err| usage(format!("cannot read the response from {url}: {err}")))?;
     serde_json::from_str(&body).map_err(|_| usage(format!("{url} did not return JSON")))
+}
+
+/// One POST's answer: every status comes back, including errors, so the
+/// caller decides what a 401 or a GraphQL error body means.
+pub struct Response {
+    pub status: u16,
+    pub retry_after: Option<String>,
+    pub body: String,
+}
+
+/// Issue exactly one POST with a JSON body. Like [`http_get_json`], it never
+/// retries and never follows a redirect.
+pub fn http_post_json(
+    url: &str,
+    headers: &Headers,
+    body: &Value,
+    timeout: Duration,
+) -> Result<Response, Error> {
+    let mut request = http_agent(timeout).post(url);
+    for (name, value) in &headers.0 {
+        request = request.header(*name, value);
+    }
+    let mut response = request
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .map_err(|err| usage(format!("cannot reach {url}: {err}")))?;
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| usage(format!("cannot read the response from {url}: {err}")))?;
+    Ok(Response {
+        status: response.status().as_u16(),
+        retry_after: retry_after(&response),
+        body: text,
+    })
 }
 
 pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
