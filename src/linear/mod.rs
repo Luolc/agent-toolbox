@@ -1,6 +1,7 @@
 //! `atb linear <command>`: claim and release Linear issues by comment, create
 //! issues for agents, and run read-only GraphQL queries.
 
+mod config;
 mod document;
 mod key;
 mod states;
@@ -11,12 +12,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::common::{Context, Error, Headers, http_post_json, usage};
+use config::Config;
 use key::Key;
-use states::{BACKLOG, COMPLETED, Overrides, STARTED, State, UNSTARTED};
+use states::{BACKLOG, COMPLETED, STARTED, State, UNSTARTED};
 
 const API_URL: &str = "https://api.linear.app/graphql";
 const TIMEOUT: Duration = Duration::from_secs(30);
-const LABEL: &str = "agent";
 
 pub const EXIT_CLAIM_LOST: u8 = 3;
 pub const EXIT_RELEASE_REFUSED: u8 = 4;
@@ -35,8 +36,9 @@ An empty variable counts as unset. LINEAR_API_URL overrides the endpoint.
 
 States are chosen by type: the first `started` state (lowest position, then
 name) for claim, the first `completed` for release --done. The optional
-$XDG_CONFIG_HOME/linear/config.json, {\"states\": {\"started\": \"<name>\", ...}},
-names the state to use for a type instead.
+config file $XDG_CONFIG_HOME/linear/config.json, beside the key cache, holds
+{\"states\": {\"<type>\": \"<state name>\", ...}, \"default_labels\": [...]}:
+the state to use for a type instead of the first, and labels create adds.
 
 Exit status: 0 on success, 1 on error, 2 on a usage error or when Linear
 answers 429 (the retry-after value is printed; nothing is retried), 3 when a
@@ -97,8 +99,9 @@ enum Command {
         /// A file holding the query, or the query text itself
         graphql: String,
     },
-    /// Create an issue labelled `agent` (the label is created if the team
-    /// has none) and print its identifier and URL
+    /// Create an issue with the labels from --label and the config's
+    /// default_labels (a missing label is created on the team), and print
+    /// its identifier and URL
     Create {
         /// Team key, such as TEAM
         #[arg(long)]
@@ -110,6 +113,9 @@ enum Command {
         title: String,
         #[arg(long, value_name = "FILE")]
         description_file: PathBuf,
+        /// A label to add; repeatable
+        #[arg(long = "label", value_name = "NAME")]
+        labels: Vec<String>,
         /// Print the identifier and URL as JSON
         #[arg(long)]
         json: bool,
@@ -125,11 +131,9 @@ pub fn run(args: Args) -> Result<u8, Error> {
         Command::Query { graphql } => Some(read_only_query(graphql)?),
         _ => None,
     };
-    let overrides = match &args.command {
-        Command::Claim { .. } | Command::Release { .. } => {
-            Overrides::load(&config_dir(&ctx)?.join("config.json"))?
-        }
-        _ => Overrides::default(),
+    let config = match &args.command {
+        Command::Query { .. } => Config::default(),
+        _ => Config::load(&config_dir(&ctx)?.join("config.json"))?,
     };
     let mut client = Client {
         url: match ctx.var("LINEAR_API_URL") {
@@ -146,7 +150,7 @@ pub fn run(args: Args) -> Result<u8, Error> {
             agent,
             source,
             scope,
-        } => claim(&mut client, &overrides, &issue, &agent, &source, &scope),
+        } => claim(&mut client, &config, &issue, &agent, &source, &scope),
         Command::Release {
             issue,
             agent,
@@ -159,7 +163,7 @@ pub fn run(args: Args) -> Result<u8, Error> {
                 Some(why) => Why::Force(why),
                 None => Why::Reason(reason.expect("clap requires --reason or --force")),
             };
-            release(&mut client, &overrides, &issue, &agent, why, done)
+            release(&mut client, &config, &issue, &agent, why, done)
         }
         Command::Query { .. } => run_query(&mut client, &query.expect("read before the key")),
         Command::Create {
@@ -167,15 +171,23 @@ pub fn run(args: Args) -> Result<u8, Error> {
             project,
             title,
             description_file,
+            labels,
             json,
-        } => create(
-            &mut client,
-            &team,
-            project.as_deref(),
-            &title,
-            &description_file,
-            json,
-        ),
+        } => {
+            let mut all = labels;
+            all.extend(config.default_labels);
+            let mut seen = std::collections::HashSet::new();
+            all.retain(|label| seen.insert(label.clone()));
+            create(
+                &mut client,
+                &team,
+                project.as_deref(),
+                &title,
+                &description_file,
+                &all,
+                json,
+            )
+        }
     };
     result.map_err(|err| match err {
         Error::Usage(message) => Error::Usage(client.key.mask(&message)),
@@ -321,8 +333,8 @@ struct Issue {
 
 impl Issue {
     /// The state to use for `kind`; a team without one is an error.
-    fn state_of_type(&self, kind: &str, overrides: &Overrides) -> Result<&State, Error> {
-        states::pick(&self.states, kind, overrides)?.ok_or_else(|| {
+    fn state_of_type(&self, kind: &str, config: &Config) -> Result<&State, Error> {
+        states::pick(&self.states, kind, &config.states)?.ok_or_else(|| {
             usage(format!(
                 "the team of {} has no {kind} state",
                 self.identifier
@@ -472,14 +484,14 @@ fn claimed_from(claim: &str) -> Option<&str> {
 
 fn claim(
     client: &mut Client,
-    overrides: &Overrides,
+    config: &Config,
     ident: &str,
     agent: &str,
     source: &str,
     scope: &str,
 ) -> Result<u8, Error> {
     let issue = issue_info(client, ident)?;
-    let started = issue.state_of_type(STARTED, overrides)?;
+    let started = issue.state_of_type(STARTED, config)?;
     set_state(client, &issue, started)?;
     let mine = comment(
         client,
@@ -522,17 +534,13 @@ enum Why {
 /// The state a release without --done restores: the one the claim recorded
 /// if the team still has it, else the first unstarted state, else the first
 /// backlog state. Overrides apply to both fallbacks.
-fn prior_state<'a>(
-    issue: &'a Issue,
-    claim: &str,
-    overrides: &Overrides,
-) -> Result<&'a State, Error> {
+fn prior_state<'a>(issue: &'a Issue, claim: &str, config: &Config) -> Result<&'a State, Error> {
     let recorded = claimed_from(claim);
     if let Some(state) = recorded.and_then(|name| issue.states.iter().find(|s| s.name == name)) {
         return Ok(state);
     }
     for kind in [UNSTARTED, BACKLOG] {
-        if let Some(state) = states::pick(&issue.states, kind, overrides)? {
+        if let Some(state) = states::pick(&issue.states, kind, &config.states)? {
             return Ok(state);
         }
     }
@@ -549,7 +557,7 @@ fn prior_state<'a>(
 
 fn release(
     client: &mut Client,
-    overrides: &Overrides,
+    config: &Config,
     ident: &str,
     agent: &str,
     why: Why,
@@ -579,9 +587,9 @@ fn release(
     let (holder, claim) = (holder.to_owned(), claim.to_owned());
     comment(client, &issue, &body)?;
     let state = if done {
-        issue.state_of_type(COMPLETED, overrides)?
+        issue.state_of_type(COMPLETED, config)?
     } else {
-        prior_state(&issue, &claim, overrides)?
+        prior_state(&issue, &claim, config)?
     };
     set_state(client, &issue, state)?;
     client.print(&format!("released {} (held by {holder})", issue.identifier));
@@ -594,6 +602,7 @@ fn create(
     project: Option<&str>,
     title: &str,
     description_file: &Path,
+    labels: &[String],
     as_json: bool,
 ) -> Result<u8, Error> {
     let description = std::fs::read_to_string(description_file)
@@ -625,7 +634,13 @@ fn create(
         };
         input["projectId"] = text(node, "/id")?.into();
     }
-    input["labelIds"] = json!([agent_label(client, &team)?]);
+    if !labels.is_empty() {
+        let ids = labels
+            .iter()
+            .map(|name| label_id(client, &team, name))
+            .collect::<Result<Vec<_>, _>>()?;
+        input["labelIds"] = json!(ids);
+    }
     let data = client.request(
         "mutation($i: IssueCreateInput!) { issueCreate(input: $i) { success issue { identifier url } } }",
         json!({"i": input}),
@@ -640,12 +655,12 @@ fn create(
     Ok(0)
 }
 
-/// The id of the `agent` label usable in the team: a workspace label or the
+/// The id of the label `name` usable in the team: a workspace label or the
 /// team's own. Created on the team when there is none.
-fn agent_label(client: &mut Client, team: &str) -> Result<String, Error> {
+fn label_id(client: &mut Client, team: &str, name: &str) -> Result<String, Error> {
     let data = client.request(
         "query($n: String!) { issueLabels(filter: {name: {eq: $n}}) { nodes { id team { id } } } }",
-        json!({"n": LABEL}),
+        json!({"n": name}),
     )?;
     let existing = data
         .pointer("/issueLabels/nodes")
@@ -658,7 +673,7 @@ fn agent_label(client: &mut Client, team: &str) -> Result<String, Error> {
     }
     let data = client.request(
         "mutation($n: String!, $t: String!) { issueLabelCreate(input: {name: $n, teamId: $t}) { success issueLabel { id } } }",
-        json!({"n": LABEL, "t": team}),
+        json!({"n": name, "t": team}),
     )?;
     Ok(text(&data, "/issueLabelCreate/issueLabel/id")?.to_owned())
 }

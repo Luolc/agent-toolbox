@@ -43,8 +43,8 @@ struct State {
     issue_state: String,
     /// (id, createdAt, body)
     comments: Vec<(String, String, String)>,
-    /// (id, team id or none for a workspace label)
-    labels: Vec<(String, Option<String>)>,
+    /// (id, name, team id or none for a workspace label)
+    labels: Vec<(String, String, Option<String>)>,
     created: Vec<Value>,
     viewer_id: String,
 }
@@ -96,16 +96,20 @@ impl State {
             }}}})
         } else if query.contains("issueLabelCreate") {
             let id = format!("l-{}", self.labels.len());
-            self.labels
-                .push((id.clone(), vars["t"].as_str().map(str::to_owned)));
+            self.labels.push((
+                id.clone(),
+                vars["n"].as_str().unwrap().to_owned(),
+                vars["t"].as_str().map(str::to_owned),
+            ));
             json!({"issueLabelCreate": {"success": true, "issueLabel": {"id": id}}})
         } else if query.contains("issueLabels") {
             let nodes: Vec<Value> = self
                 .labels
                 .iter()
-                .map(
-                    |(id, team)| json!({"id": id, "team": team.as_ref().map(|t| json!({"id": t}))}),
-                )
+                .filter(|(_, name, _)| vars["n"] == *name)
+                .map(|(id, _, team)| {
+                    json!({"id": id, "team": team.as_ref().map(|t| json!({"id": t}))})
+                })
                 .collect();
             json!({"issueLabels": {"nodes": nodes}})
         } else if query.contains("issueCreate") {
@@ -729,13 +733,10 @@ fn a_failing_key_command_reports_only_its_exit_status() {
     assert!(fake.state().requests.is_empty());
 }
 
-#[test]
-fn create_labels_the_issue_and_creates_the_label_only_when_missing() {
-    let fake = Fake::start(&[KEY]);
-    let home = scratch("create");
-    let description = home.join("description.md");
+fn create(fake: &Fake, extra: &[&str]) -> Output {
+    let description = fake.home.join("description.md");
     fs::write(&description, "Body text.\n").unwrap();
-    let args = [
+    let mut args = vec![
         "create",
         "--team",
         "TEAM",
@@ -745,62 +746,60 @@ fn create_labels_the_issue_and_creates_the_label_only_when_missing() {
         "Do a thing",
         "--description-file",
         description.to_str().unwrap(),
-        "--json",
     ];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
 
-    let output = linear(&fake, &args);
+#[test]
+fn create_without_labels_adds_none_and_looks_none_up() {
+    let fake = Fake::start(&[KEY]);
+    let output = create(&fake, &["--json"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({"identifier": "ABC-9", "url": "https://linear.example/ABC-9"})
     );
     assert_eq!(
-        fake.state().labels,
-        [("l-0".to_owned(), Some("t-1".to_owned()))]
-    );
-
-    let output = linear(&fake, &args);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(fake.state().labels.len(), 1);
-    let state = fake.state();
-    for input in &state.created {
-        assert_eq!(
-            *input,
+        fake.state().created,
+        [
             json!({"teamId": "t-1", "title": "Do a thing", "description": "Body text.\n",
-                   "projectId": "p-1", "labelIds": ["l-0"]})
-        );
-    }
+                "projectId": "p-1"})
+        ]
+    );
+    assert_eq!(fake.first("issueLabel"), None);
+}
+
+#[test]
+fn create_merges_flag_and_default_labels_and_creates_a_missing_one_once() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().labels.push(("l-ws".into(), "x".into(), None));
+    fake.write_config(r#"{"default_labels": ["y", "z"]}"#);
+    let args = ["--label", "x", "--label", "y", "--label", "x"];
+
+    let output = create(&fake, &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "ABC-9 https://linear.example/ABC-9");
+    let output = create(&fake, &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let state = fake.state();
+    assert_eq!(
+        state.labels[1..],
+        [
+            ("l-1".to_owned(), "y".to_owned(), Some("t-1".to_owned())),
+            ("l-2".to_owned(), "z".to_owned(), Some("t-1".to_owned())),
+        ]
+    );
     assert_eq!(state.created.len(), 2);
+    for input in &state.created {
+        assert_eq!(input["labelIds"], json!(["l-ws", "l-1", "l-2"]));
+    }
     let creates = state
         .requests
         .iter()
         .filter(|r| r.query.contains("issueLabelCreate"));
-    assert_eq!(creates.count(), 1);
-}
-
-#[test]
-fn create_uses_an_existing_workspace_label() {
-    let fake = Fake::start(&[KEY]);
-    fake.state().labels.push(("l-ws".into(), None));
-    let home = scratch("create-workspace-label");
-    let description = home.join("description.md");
-    fs::write(&description, "x").unwrap();
-    let output = linear(
-        &fake,
-        &[
-            "create",
-            "--team",
-            "TEAM",
-            "--title",
-            "t",
-            "--description-file",
-            description.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(stdout(&output).trim(), "ABC-9 https://linear.example/ABC-9");
-    assert_eq!(fake.state().created[0]["labelIds"], json!(["l-ws"]));
-    assert_eq!(fake.first("issueLabelCreate"), None);
+    assert_eq!(creates.count(), 2);
 }
 
 #[test]
