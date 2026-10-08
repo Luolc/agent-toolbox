@@ -46,6 +46,9 @@ struct State {
     /// (id, name, team id or none for a workspace label)
     labels: Vec<(String, String, Option<String>)>,
     created: Vec<Value>,
+    /// (id, name, team ids)
+    projects: Vec<(String, String, Vec<String>)>,
+    created_projects: Vec<Value>,
     viewer_id: String,
 }
 
@@ -73,8 +76,54 @@ impl State {
             .collect();
     }
 
+    fn add_project(&mut self, name: &str, teams: &[&str]) -> String {
+        let id = format!("p-{}", self.projects.len() + 10);
+        let teams = teams.iter().map(|t| (*t).to_owned()).collect();
+        self.projects.push((id.clone(), name.to_owned(), teams));
+        id
+    }
+
     fn answer(&mut self, query: &str, vars: &Value) -> Value {
-        if query.contains("issueUpdate") {
+        if query.contains("projectCreate") {
+            let input = vars["i"].clone();
+            let name = input["name"].as_str().unwrap().to_owned();
+            let teams: Vec<&str> = input["teamIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap())
+                .collect();
+            let id = self.add_project(&name, &teams);
+            self.created_projects.push(input);
+            json!({"projectCreate": {"success": true, "project": {
+                "id": id, "name": name, "url": project_url(&id)}}})
+        } else if query.contains("projects(first") {
+            // Pages of one, and names compared ignoring case as a collation
+            // might: atb must paginate and compare names itself.
+            let matching: Vec<_> = self
+                .projects
+                .iter()
+                .filter(|p| p.1.eq_ignore_ascii_case(vars["n"].as_str().unwrap()))
+                .collect();
+            let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
+            let end = (start + 1).min(matching.len());
+            let nodes: Vec<Value> = matching[start..end]
+                .iter()
+                .map(|(id, name, teams)| {
+                    let teams: Vec<Value> = teams
+                        .iter()
+                        .filter(|t| vars["t"] == **t)
+                        .map(|t| json!({"id": t}))
+                        .collect();
+                    json!({"id": id, "name": name, "url": project_url(id),
+                        "teams": {"nodes": teams}})
+                })
+                .collect();
+            json!({"projects": {"nodes": nodes, "pageInfo": {
+                "hasNextPage": end < matching.len(),
+                "endCursor": end.to_string(),
+            }}})
+        } else if query.contains("issueUpdate") {
             let state = self.states.iter().find(|s| vars["s"] == s.0).unwrap();
             self.issue_state = state.1.clone();
             json!({"issueUpdate": {"success": true}})
@@ -171,6 +220,8 @@ impl Fake {
             comments: Vec::new(),
             labels: Vec::new(),
             created: Vec::new(),
+            projects: Vec::new(),
+            created_projects: Vec::new(),
             viewer_id: "u-1".into(),
         };
         state.set_states(&[
@@ -223,6 +274,10 @@ impl Fake {
             .iter()
             .position(|r| r.query.contains(needle))
     }
+}
+
+fn project_url(id: &str) -> String {
+    format!("https://linear.example/project/{id}")
 }
 
 /// Answer one request on one connection, then close it.
@@ -863,4 +918,90 @@ fn query_refuses_a_mutation_before_any_request_and_passes_a_query() {
     let state = fake.state();
     assert_eq!(state.requests.len(), 1);
     assert_eq!(state.requests[0].variables, json!({}));
+}
+
+fn create_project(fake: &Fake, extra: &[&str]) -> Output {
+    let mut args = vec![
+        "project",
+        "create",
+        "--team",
+        "TEAM",
+        "--name",
+        "Project name",
+    ];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
+
+#[test]
+fn project_create_creates_a_missing_project_once_and_then_prints_it() {
+    let fake = Fake::start(&[KEY]);
+    // Same name in another case, on the team: not the project asked for.
+    fake.state().add_project("project name", &["t-1"]);
+    let description = fake.home.join("description.md");
+    fs::write(&description, "# Goal\n\nBody text.\n").unwrap();
+
+    let output = create_project(
+        &fake,
+        &["--description-file", description.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Project name https://linear.example/project/p-11"
+    );
+    assert_eq!(
+        fake.state().created_projects,
+        [json!({"name": "Project name", "teamIds": ["t-1"],
+            "content": "# Goal\n\nBody text.\n"})]
+    );
+
+    let output = create_project(&fake, &["--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"name": "Project name", "url": "https://linear.example/project/p-11",
+            "id": "p-11", "created": false})
+    );
+    assert_eq!(fake.mutations(), 1);
+}
+
+#[test]
+fn project_create_prints_a_project_already_on_the_team_without_writing() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_project("Project name", &["t-0", "t-1"]);
+    let output = create_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Project name https://linear.example/project/p-10"
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn project_create_refuses_a_project_on_another_team_or_several_with_the_name() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_project("Project name", &["t-2"]);
+    let output = create_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("is not on team TEAM"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+
+    // The one on the team comes first; the second is on the next page.
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_project("Project name", &["t-1"]);
+    fake.state().add_project("Project name", &["t-2"]);
+    let output = create_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("2 projects are named"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
 }

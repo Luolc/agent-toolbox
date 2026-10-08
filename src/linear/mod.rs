@@ -1,5 +1,5 @@
 //! `atb linear <command>`: claim and release Linear issues by comment, create
-//! issues for agents, and run read-only GraphQL queries.
+//! issues and projects for agents, and run read-only GraphQL queries.
 
 mod config;
 mod document;
@@ -120,6 +120,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Projects: create
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ProjectCommand {
+    /// Create a project on the team and print its name and URL. A project
+    /// with exactly this name that is already on the team is printed
+    /// instead, without a change; one that is not on the team, or several
+    /// with the name, is an error and nothing is written
+    Create {
+        /// Team key, such as TEAM
+        #[arg(long)]
+        team: String,
+        /// Project name, matched exactly (case-sensitive) against existing
+        /// projects
+        #[arg(long)]
+        name: String,
+        /// Markdown for the project's content (the long body, not the short
+        /// description)
+        #[arg(long, value_name = "FILE")]
+        description_file: Option<PathBuf>,
+        /// Print name, URL, id and whether it was created as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The exit status on success or on a protocol outcome (3, 4).
@@ -188,6 +217,15 @@ pub fn run(args: Args) -> Result<u8, Error> {
                 json,
             )
         }
+        Command::Project {
+            command:
+                ProjectCommand::Create {
+                    team,
+                    name,
+                    description_file,
+                    json,
+                },
+        } => create_project(&mut client, &team, &name, description_file.as_deref(), json),
     };
     result.map_err(|err| match err {
         Error::Usage(message) => Error::Usage(client.key.mask(&message)),
@@ -607,14 +645,7 @@ fn create(
 ) -> Result<u8, Error> {
     let description = std::fs::read_to_string(description_file)
         .map_err(|err| usage(format!("cannot read {}: {err}", description_file.display())))?;
-    let data = client.request(
-        "query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id } } }",
-        json!({"k": team_key}),
-    )?;
-    let team = match data.pointer("/teams/nodes").and_then(Value::as_array) {
-        Some(nodes) if !nodes.is_empty() => text(&nodes[0], "/id")?.to_owned(),
-        _ => return Err(usage(format!("no team with key {team_key}"))),
-    };
+    let team = team_id(client, team_key)?;
     let mut input = json!({"teamId": team, "title": title, "description": description});
     if let Some(name) = project {
         let data = client.request(
@@ -651,6 +682,126 @@ fn create(
         client.print_json(&json!({"identifier": identifier, "url": url}));
     } else {
         client.print(&format!("{identifier} {url}"));
+    }
+    Ok(0)
+}
+
+fn team_id(client: &mut Client, key: &str) -> Result<String, Error> {
+    let data = client.request(
+        "query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id } } }",
+        json!({"k": key}),
+    )?;
+    match data.pointer("/teams/nodes").and_then(Value::as_array) {
+        Some(nodes) if !nodes.is_empty() => Ok(text(&nodes[0], "/id")?.to_owned()),
+        _ => Err(usage(format!("no team with key {key}"))),
+    }
+}
+
+struct Project {
+    id: String,
+    name: String,
+    url: String,
+    on_team: bool,
+}
+
+/// Every project named exactly `name`, across pages, with whether `team` is
+/// among its teams. The name is compared here as well, so the match is
+/// case-sensitive whatever collation the server uses.
+fn projects_named(client: &mut Client, name: &str, team: &str) -> Result<Vec<Project>, Error> {
+    let mut all = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let data = client.request(
+            "query($n: String!, $t: ID!, $after: String) { projects(first: 50, after: $after, filter: {name: {eq: $n}}) { nodes { id name url teams(filter: {id: {eq: $t}}) { nodes { id } } } pageInfo { hasNextPage endCursor } } }",
+            json!({"n": name, "t": team, "after": after}),
+        )?;
+        let page = &data["projects"];
+        for node in page["nodes"].as_array().into_iter().flatten() {
+            if text(node, "/name")? != name {
+                continue;
+            }
+            all.push(Project {
+                id: text(node, "/id")?.to_owned(),
+                name: name.to_owned(),
+                url: text(node, "/url")?.to_owned(),
+                on_team: node
+                    .pointer("/teams/nodes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|teams| !teams.is_empty()),
+            });
+        }
+        if page.pointer("/pageInfo/hasNextPage") != Some(&Value::Bool(true)) {
+            break;
+        }
+        after = Value::from(text(page, "/pageInfo/endCursor")?);
+    }
+    Ok(all)
+}
+
+/// Idempotent by name: an existing project on the team is printed as it is,
+/// and nothing is written unless no project has the name.
+fn create_project(
+    client: &mut Client,
+    team_key: &str,
+    name: &str,
+    description_file: Option<&Path>,
+    as_json: bool,
+) -> Result<u8, Error> {
+    let content = description_file
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|err| usage(format!("cannot read {}: {err}", path.display())))
+        })
+        .transpose()?;
+    let team = team_id(client, team_key)?;
+    let mut existing = projects_named(client, name, &team)?;
+    if existing.len() > 1 {
+        return Err(usage(format!(
+            "{} projects are named {name:?}; nothing created",
+            existing.len()
+        )));
+    }
+    let (project, created) = match existing.pop() {
+        Some(project) if project.on_team => {
+            client.note(&format!(
+                "project {name:?} already exists on team {team_key}; nothing created"
+            ));
+            (project, false)
+        }
+        Some(project) => {
+            return Err(usage(format!(
+                "project {name:?} exists but is not on team {team_key} ({}); \
+                 nothing created, the team was not added",
+                project.url
+            )));
+        }
+        None => {
+            let mut input = json!({"name": name, "teamIds": [team]});
+            if let Some(content) = content {
+                input["content"] = content.into();
+            }
+            let data = client.request(
+                "mutation($i: ProjectCreateInput!) { projectCreate(input: $i) { success project { id name url } } }",
+                json!({"i": input}),
+            )?;
+            let project = Project {
+                id: text(&data, "/projectCreate/project/id")?.to_owned(),
+                name: text(&data, "/projectCreate/project/name")?.to_owned(),
+                url: text(&data, "/projectCreate/project/url")?.to_owned(),
+                on_team: true,
+            };
+            (project, true)
+        }
+    };
+    if as_json {
+        client.print_json(&json!({
+            "name": project.name,
+            "url": project.url,
+            "id": project.id,
+            "created": created,
+        }));
+    } else {
+        client.print(&format!("{} {}", project.name, project.url));
     }
     Ok(0)
 }
