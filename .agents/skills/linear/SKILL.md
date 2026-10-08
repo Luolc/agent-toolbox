@@ -1,19 +1,19 @@
 ---
 name: linear
-description: Claim and release Linear issues with `atb linear`, create issues for agents, and run read-only GraphQL queries. Use before an agent starts work on a repository whose Linear issue it must claim, when it finishes or gives up (release), when it files a new issue for agent work, and to look up issues by assignee, label or state.
+description: Claim and release Linear issues with `atb linear`, create issues, and run read-only GraphQL queries. Use before an agent starts work on a repository whose Linear issue it must claim, when it finishes or gives up (release), when it files a new issue for agent work, and to look up issues by assignee, label or state.
 ---
 
 # Linear claims and queries
 
-`atb linear` writes claim and release comments in a fixed format, sets the workflow state, and checks for a conflicting claim. Everything below uses placeholders: `ABC-123` for an issue, `TEAM` for a team key.
+`atb linear` writes claim and release comments in a fixed format, sets the workflow state, and checks for a conflicting claim. Everything below uses placeholders: `ABC-123` for an issue, `TEAM` for a team key; state names such as `Todo` are examples, since every workspace names its states its own way.
 
-All agents share one Linear account, so the assignee does not say who is working on an issue; the comments do. Issues created by agents carry the `agent` label.
+All agents share one Linear account, so the assignee does not say who is working on an issue; the comments do.
 
 ## Rules
 
-1. **Claim**: `atb linear claim` sets the issue to In Progress, then writes one comment: line 1 `claim: <agent> <source>`, line 2 `scope: <repo>: <paths>`. The source is the thread key or the name of the dispatching agent. The claim counts only when both steps are done.
+1. **Claim**: `atb linear claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>`, line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before the claim. The source is the thread key or the name of the dispatching agent. The claim counts only when both steps are done. An issue in a `started` state is being worked on; the state's name does not matter.
 2. **Conflict**: after writing the comment, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. Stop work on that issue. An earlier claim by the same agent is not a conflict.
-3. **Release**: when done or giving up, `atb linear release` writes `release: <agent> <reason>`, then sets Done or Todo if asked. Only the current holder may release (see below).
+3. **Release**: when done or giving up, `atb linear release` writes `release: <agent> <reason>`, then sets the state: with `--done`, the first `completed` state; otherwise it restores the state the claim recorded (see [States](#states)). Only the current holder may release (see below).
 4. **Stale claims**: never take over. A `claim:` older than 24 hours on an issue with no other update is a suspected leftover: report it to the dispatching agent, which decides. Only that decision justifies `release --force`.
 5. **Not a lock**: two agents can still claim within the same moment. The work ends up in git, so a collision shows as a merge conflict on a pull request, visible rather than silent. A soft rule is enough.
 6. **Only the commands**: claim and release only with `atb linear claim` and `atb linear release`; never write `claim:` or `release:` comments by hand.
@@ -26,24 +26,44 @@ All agents share one Linear account, so the assignee does not say who is working
 ```sh
 atb linear claim ABC-123 --agent docs-impl --source thread-42 --scope 'my-repo: src/, docs/'
 atb linear release ABC-123 --agent docs-impl --reason merged --done
-atb linear release ABC-123 --agent docs-impl --reason 'blocked on review' --todo
-atb linear release ABC-123 --agent my-orchestra --force 'stale for three days, holder gone' --todo
-atb linear create --team TEAM --project 'Project name' --title 'Short title' --description-file body.md
+atb linear release ABC-123 --agent docs-impl --reason 'blocked on review'
+atb linear release ABC-123 --agent my-orchestra --force 'stale for three days, holder gone'
+atb linear create --team TEAM --project 'Project name' --title 'Short title' --description-file body.md --label bug
 atb linear query '{ viewer { id } }'
 ```
 
-- `<ISSUE>` is the Linear identifier, such as `ABC-123`. States are looked up by name (`In Progress`, `Done`, `Todo`) among the workflow states of the issue's team; a missing state is an error, never a guess.
-- `release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the current holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). `--done` or `--todo` sets the state after the comment; with neither, the state stays as it is. When refused, nothing is written and the state is unchanged.
-- `create` resolves the team by key and the project by name within that team (missing or ambiguous: error), uses an `agent` label (a workspace label or the team's own, created on the team if there is none), and prints `<identifier> <url>`, or JSON with `--json`.
+- `<ISSUE>` is the Linear identifier, such as `ABC-123`.
+- `release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the current holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment comes first, then the state. When refused, nothing is written and the state is unchanged. `--todo` is deprecated: it is accepted so that 0.2.0 callers keep working and does nothing, restoring is the default.
+- `create` resolves the team by key and the project by name within that team (missing or ambiguous: error) and prints `<identifier> <url>`, or JSON with `--json`. It adds the labels given with `--label <name>` (repeatable) and those in `default_labels` of the config file, each once; a label that is neither a workspace label nor the team's own is created on the team. With no labels, the issue has none.
 - `query` takes a file path if such a file exists, otherwise the query text, and prints the response's `data` as JSON. It is read-only: a document containing a `mutation` or `subscription` operation is refused before anything is sent.
 
 | Exit status | Meaning |
 |---|---|
 | 0 | Success (`claim`: the issue is yours) |
-| 1 | Error: no key, issue or state not found, Linear refused a change, HTTP or GraphQL error |
+| 1 | Error: no key, issue not found, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
 | 2 | Usage error, or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
 | 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written, leave the issue alone |
 | 4 | `release` refused: the issue has no holder, or the holder is another agent and `--force` was not given |
+
+## States
+
+States are chosen by type, never by name. Among the team's states of one type, the first is the one with the lowest position (the order Linear shows them in), ties broken by name, then id, so every agent picks the same one.
+
+| Command | State |
+|---|---|
+| `claim` | the first `started` state |
+| `release --done` | the first `completed` state |
+| `release` (giving up, or `--force`) | the state named in the claim's `from:` line; if there is none (a claim written by 0.2.0) or the team no longer has a state of that name, the first `unstarted` state, else the first `backlog` state |
+
+When `release` finds no state to restore, it has still written its comment; it then exits 1 and leaves the state alone. If the issue was already `started` when it was claimed (for example after a claim that lost), `from:` records that state and a release restores it.
+
+The config file `$XDG_CONFIG_HOME/linear/config.json` (default `~/.config/linear/config.json`, under `$ATB_HOME` if set, beside the key cache) can name the state to use for a type, and labels for `create`. Both keys are optional; a missing file is an empty config. For example:
+
+```json
+{"states": {"started": "Active", "unstarted": "Ready"}, "default_labels": ["bug"]}
+```
+
+An override applies wherever its type is used, the release fallbacks included: with the example, a release without a `from:` state restores `Ready`. An override naming a state the team does not have, with that type, is an error and nothing is changed (for `release`, after its comment). A config file that cannot be read or parsed is an error naming the file.
 
 If a `claim` fails after its comment was written but before the conflict check finished, it says so on stderr: a claim comment may be on the issue without a check. Run `claim` again (an earlier claim by the same agent is not a conflict), or release it.
 
@@ -67,10 +87,10 @@ The filters follow Linear's schema; they have not yet been run against a real wo
 ```sh
 # Open issues assigned to the shared account
 atb linear query '{ viewer { assignedIssues(filter: {state: {type: {nin: ["completed", "canceled"]}}}) { nodes { identifier title state { name } } } } }'
-# Issues with the agent label
-atb linear query '{ issues(filter: {labels: {name: {eq: "agent"}}}) { nodes { identifier title state { name } } } }'
-# Issues in one state
-atb linear query '{ issues(filter: {state: {name: {eq: "In Progress"}}}) { nodes { identifier title } } }'
+# Issues with one label
+atb linear query '{ issues(filter: {labels: {name: {eq: "bug"}}}) { nodes { identifier title state { name } } } }'
+# Issues being worked on, whatever the state is called
+atb linear query '{ issues(filter: {state: {type: {eq: "started"}}}) { nodes { identifier title state { name } } } }'
 # Comments on one issue: who holds it
 atb linear query '{ issue(id: "ABC-123") { comments { nodes { body createdAt } } } }'
 ```

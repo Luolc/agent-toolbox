@@ -4,6 +4,8 @@ A release is one tag push. `.github/workflows/release.yml` then checks the tag a
 
 Releasing is the maintainer's call: an agent pushes a tag or publishes only on the maintainer's explicit instruction.
 
+After v0.2.0, `atb linear` changes are released as patch versions (0.2.1, 0.2.2, ...).
+
 The workflow was written after limae's; its [release manual](https://github.com/Luolc/limae/blob/main/docs/knowledge/release.md) (Chinese) explains the design choices in more detail.
 
 ## 1. Preconditions

@@ -1,8 +1,10 @@
 //! `atb linear <command>`: claim and release Linear issues by comment, create
 //! issues for agents, and run read-only GraphQL queries.
 
+mod config;
 mod document;
 mod key;
+mod states;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,11 +12,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::common::{Context, Error, Headers, http_post_json, usage};
+use config::Config;
 use key::Key;
+use states::{BACKLOG, COMPLETED, STARTED, State, UNSTARTED};
 
 const API_URL: &str = "https://api.linear.app/graphql";
 const TIMEOUT: Duration = Duration::from_secs(30);
-const LABEL: &str = "agent";
 
 pub const EXIT_CLAIM_LOST: u8 = 3;
 pub const EXIT_RELEASE_REFUSED: u8 = 4;
@@ -31,6 +34,12 @@ Key sources, highest first:
      is retried once; a second 401 is an error.
 An empty variable counts as unset. LINEAR_API_URL overrides the endpoint.
 
+States are chosen by type: the first `started` state (lowest position, then
+name) for claim, the first `completed` for release --done. The optional
+config file $XDG_CONFIG_HOME/linear/config.json, beside the key cache, holds
+{\"states\": {\"<type>\": \"<state name>\", ...}, \"default_labels\": [...]}:
+the state to use for a type instead of the first, and labels create adds.
+
 Exit status: 0 on success, 1 on error, 2 on a usage error or when Linear
 answers 429 (the retry-after value is printed; nothing is retried), 3 when a
 claim lost to an earlier claim, 4 when a release was refused (no holder, or
@@ -45,8 +54,9 @@ pub struct Args {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Set the issue In Progress and write a claim comment; exit 3 if an
-    /// earlier claim by another agent is still held
+    /// Set the issue to the first started state and write a claim comment
+    /// that records the prior state; exit 3 if an earlier claim by another
+    /// agent is still held
     Claim {
         /// Issue identifier, such as ABC-123
         issue: String,
@@ -59,8 +69,9 @@ enum Command {
         #[arg(long)]
         scope: String,
     },
-    /// Write a release comment for the current holder, then optionally set
-    /// Done or Todo; exit 4 if refused
+    /// Write a release comment for the current holder, then restore the
+    /// state from before the claim, or set the first completed state with
+    /// --done; exit 4 if refused
     #[command(group = clap::ArgGroup::new("why").required(true))]
     Release {
         /// Issue identifier, such as ABC-123
@@ -74,10 +85,11 @@ enum Command {
         /// holder and --agent
         #[arg(long, group = "why", value_name = "WHY")]
         force: Option<String>,
-        /// Set the state to Done after releasing
+        /// Set the first completed state instead of restoring the prior one
         #[arg(long, conflicts_with = "todo")]
         done: bool,
-        /// Set the state to Todo after releasing
+        /// Deprecated, accepted for 0.2.0 callers: does nothing, restoring
+        /// the prior state is the default
         #[arg(long)]
         todo: bool,
     },
@@ -87,8 +99,9 @@ enum Command {
         /// A file holding the query, or the query text itself
         graphql: String,
     },
-    /// Create an issue labelled `agent` (the label is created if the team
-    /// has none) and print its identifier and URL
+    /// Create an issue with the labels from --label and the config's
+    /// default_labels (a missing label is created on the team), and print
+    /// its identifier and URL
     Create {
         /// Team key, such as TEAM
         #[arg(long)]
@@ -100,6 +113,9 @@ enum Command {
         title: String,
         #[arg(long, value_name = "FILE")]
         description_file: PathBuf,
+        /// A label to add; repeatable
+        #[arg(long = "label", value_name = "NAME")]
+        labels: Vec<String>,
         /// Print the identifier and URL as JSON
         #[arg(long)]
         json: bool,
@@ -114,6 +130,10 @@ pub fn run(args: Args) -> Result<u8, Error> {
     let query = match &args.command {
         Command::Query { graphql } => Some(read_only_query(graphql)?),
         _ => None,
+    };
+    let config = match &args.command {
+        Command::Query { .. } => Config::default(),
+        _ => Config::load(&config_dir(&ctx)?.join("config.json"))?,
     };
     let mut client = Client {
         url: match ctx.var("LINEAR_API_URL") {
@@ -130,21 +150,20 @@ pub fn run(args: Args) -> Result<u8, Error> {
             agent,
             source,
             scope,
-        } => claim(&mut client, &issue, &agent, &source, &scope),
+        } => claim(&mut client, &config, &issue, &agent, &source, &scope),
         Command::Release {
             issue,
             agent,
             reason,
             force,
             done,
-            todo,
+            todo: _,
         } => {
             let why = match force {
                 Some(why) => Why::Force(why),
                 None => Why::Reason(reason.expect("clap requires --reason or --force")),
             };
-            let state = (done || todo).then_some(if done { "Done" } else { "Todo" });
-            release(&mut client, &issue, &agent, why, state)
+            release(&mut client, &config, &issue, &agent, why, done)
         }
         Command::Query { .. } => run_query(&mut client, &query.expect("read before the key")),
         Command::Create {
@@ -152,20 +171,38 @@ pub fn run(args: Args) -> Result<u8, Error> {
             project,
             title,
             description_file,
+            labels,
             json,
-        } => create(
-            &mut client,
-            &team,
-            project.as_deref(),
-            &title,
-            &description_file,
-            json,
-        ),
+        } => {
+            let mut all = labels;
+            all.extend(config.default_labels);
+            let mut seen = std::collections::HashSet::new();
+            all.retain(|label| seen.insert(label.clone()));
+            create(
+                &mut client,
+                &team,
+                project.as_deref(),
+                &title,
+                &description_file,
+                &all,
+                json,
+            )
+        }
     };
     result.map_err(|err| match err {
         Error::Usage(message) => Error::Usage(client.key.mask(&message)),
         other => other,
     })
+}
+
+/// `$XDG_CONFIG_HOME/linear`, else `<home>/.config/linear` with the home
+/// that `ATB_HOME` overrides: the key cache and the config file live here.
+fn config_dir(ctx: &Context) -> Result<PathBuf, Error> {
+    let config = match ctx.var("XDG_CONFIG_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => ctx.home()?.join(".config"),
+    };
+    Ok(config.join("linear"))
 }
 
 /// The query text (from the file if `arg` names one), refused unless every
@@ -288,13 +325,27 @@ fn text<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, Error> {
 struct Issue {
     id: String,
     identifier: String,
-    /// The team's workflow states as (id, name).
-    states: Vec<(String, String)>,
+    /// The name of the issue's current state.
+    state: String,
+    /// The team's workflow states.
+    states: Vec<State>,
+}
+
+impl Issue {
+    /// The state to use for `kind`; a team without one is an error.
+    fn state_of_type(&self, kind: &str, config: &Config) -> Result<&State, Error> {
+        states::pick(&self.states, kind, &config.states)?.ok_or_else(|| {
+            usage(format!(
+                "the team of {} has no {kind} state",
+                self.identifier
+            ))
+        })
+    }
 }
 
 fn issue_info(client: &mut Client, ident: &str) -> Result<Issue, Error> {
     let data = client.request(
-        "query($id: String!) { issue(id: $id) { id identifier team { states { nodes { id name } } } } }",
+        "query($id: String!) { issue(id: $id) { id identifier state { name } team { states { nodes { id name type position } } } } }",
         json!({"id": ident}),
     )?;
     let issue = &data["issue"];
@@ -306,33 +357,32 @@ fn issue_info(client: &mut Client, ident: &str) -> Result<Issue, Error> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|s| Some((s["id"].as_str()?.to_owned(), s["name"].as_str()?.to_owned())))
+        .filter_map(|s| {
+            Some(State {
+                id: s["id"].as_str()?.to_owned(),
+                name: s["name"].as_str()?.to_owned(),
+                kind: s["type"].as_str()?.to_owned(),
+                position: s["position"].as_f64()?,
+            })
+        })
         .collect();
     Ok(Issue {
         id: text(issue, "/id")?.to_owned(),
         identifier: text(issue, "/identifier")?.to_owned(),
+        state: text(issue, "/state/name")?.to_owned(),
         states,
     })
 }
 
-/// Set the state by name. A team without that state is an error: never guess.
-fn set_state(client: &mut Client, issue: &Issue, name: &str) -> Result<(), Error> {
-    let Some((state_id, _)) = issue.states.iter().find(|(_, n)| n == name) else {
-        let names: Vec<&str> = issue.states.iter().map(|(_, n)| n.as_str()).collect();
-        return Err(usage(format!(
-            "the team of {} has no state named {name:?} (it has: {})",
-            issue.identifier,
-            names.join(", ")
-        )));
-    };
+fn set_state(client: &mut Client, issue: &Issue, state: &State) -> Result<(), Error> {
     let data = client.request(
         "mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: {stateId: $s}) { success } }",
-        json!({"id": issue.id, "s": state_id}),
+        json!({"id": issue.id, "s": state.id}),
     )?;
     if data.pointer("/issueUpdate/success") != Some(&Value::Bool(true)) {
         return Err(usage(format!(
-            "Linear did not set {} to {name}",
-            issue.identifier
+            "Linear did not set {} to {}",
+            issue.identifier, state.name
         )));
     }
     Ok(())
@@ -415,29 +465,41 @@ fn earlier_claim<'a>(comments: &'a [Comment], mine: &str, agent: &str) -> Option
     })
 }
 
-/// The current holder: the agent of the latest claim that no later release
-/// by the same agent undoes. `release: <holder> lost` and
+/// The current holder and its claim comment: the latest claim that no later
+/// release by the same agent undoes. `release: <holder> lost` and
 /// `release: <holder> forced by ...` both count as releases by that holder.
-fn holder(comments: &[Comment]) -> Option<&str> {
+fn holder(comments: &[Comment]) -> Option<(&str, &str)> {
     comments.iter().enumerate().rev().find_map(|(i, c)| {
         let (kind, who) = head(&c.body)?;
-        (kind == Kind::Claim && !released_after(&comments[i + 1..], who)).then_some(who)
+        (kind == Kind::Claim && !released_after(&comments[i + 1..], who))
+            .then_some((who, c.body.as_str()))
     })
+}
+
+/// The state recorded by `from: <name>`, which claim writes as the last line.
+/// Only the last line counts, so a scope spanning lines cannot forge it.
+fn claimed_from(claim: &str) -> Option<&str> {
+    claim.lines().skip(1).last()?.strip_prefix("from: ")
 }
 
 fn claim(
     client: &mut Client,
+    config: &Config,
     ident: &str,
     agent: &str,
     source: &str,
     scope: &str,
 ) -> Result<u8, Error> {
     let issue = issue_info(client, ident)?;
-    set_state(client, &issue, "In Progress")?;
+    let started = issue.state_of_type(STARTED, config)?;
+    set_state(client, &issue, started)?;
     let mine = comment(
         client,
         &issue,
-        &format!("claim: {agent} {source}\nscope: {scope}"),
+        &format!(
+            "claim: {agent} {source}\nscope: {scope}\nfrom: {}",
+            issue.state
+        ),
     )?;
     let checked = comments(client, &issue).and_then(|all| {
         let winner = earlier_claim(&all, &mine, agent).map(str::to_owned);
@@ -469,16 +531,41 @@ enum Why {
     Force(String),
 }
 
+/// The state a release without --done restores: the one the claim recorded
+/// if the team still has it, else the first unstarted state, else the first
+/// backlog state. Overrides apply to both fallbacks.
+fn prior_state<'a>(issue: &'a Issue, claim: &str, config: &Config) -> Result<&'a State, Error> {
+    let recorded = claimed_from(claim);
+    if let Some(state) = recorded.and_then(|name| issue.states.iter().find(|s| s.name == name)) {
+        return Ok(state);
+    }
+    for kind in [UNSTARTED, BACKLOG] {
+        if let Some(state) = states::pick(&issue.states, kind, &config.states)? {
+            return Ok(state);
+        }
+    }
+    Err(usage(format!(
+        "the team of {} has no state {} and no {UNSTARTED} or {BACKLOG} state to fall back to; \
+         the state is unchanged",
+        issue.identifier,
+        match recorded {
+            Some(name) => format!("named {name:?} (recorded by the claim)"),
+            None => "recorded by the claim".to_owned(),
+        }
+    )))
+}
+
 fn release(
     client: &mut Client,
+    config: &Config,
     ident: &str,
     agent: &str,
     why: Why,
-    state: Option<&str>,
+    done: bool,
 ) -> Result<u8, Error> {
     let issue = issue_info(client, ident)?;
     let all = comments(client, &issue)?;
-    let Some(holder) = holder(&all) else {
+    let Some((holder, claim)) = holder(&all) else {
         client.note(&format!(
             "{} has no holder; nothing written, state unchanged",
             issue.identifier
@@ -497,11 +584,14 @@ fn release(
         }
         Why::Reason(reason) => format!("release: {agent} {reason}"),
     };
-    let holder = holder.to_owned();
+    let (holder, claim) = (holder.to_owned(), claim.to_owned());
     comment(client, &issue, &body)?;
-    if let Some(state) = state {
-        set_state(client, &issue, state)?;
-    }
+    let state = if done {
+        issue.state_of_type(COMPLETED, config)?
+    } else {
+        prior_state(&issue, &claim, config)?
+    };
+    set_state(client, &issue, state)?;
     client.print(&format!("released {} (held by {holder})", issue.identifier));
     Ok(0)
 }
@@ -512,6 +602,7 @@ fn create(
     project: Option<&str>,
     title: &str,
     description_file: &Path,
+    labels: &[String],
     as_json: bool,
 ) -> Result<u8, Error> {
     let description = std::fs::read_to_string(description_file)
@@ -543,7 +634,13 @@ fn create(
         };
         input["projectId"] = text(node, "/id")?.into();
     }
-    input["labelIds"] = json!([agent_label(client, &team)?]);
+    if !labels.is_empty() {
+        let ids = labels
+            .iter()
+            .map(|name| label_id(client, &team, name))
+            .collect::<Result<Vec<_>, _>>()?;
+        input["labelIds"] = json!(ids);
+    }
     let data = client.request(
         "mutation($i: IssueCreateInput!) { issueCreate(input: $i) { success issue { identifier url } } }",
         json!({"i": input}),
@@ -558,12 +655,12 @@ fn create(
     Ok(0)
 }
 
-/// The id of the `agent` label usable in the team: a workspace label or the
+/// The id of the label `name` usable in the team: a workspace label or the
 /// team's own. Created on the team when there is none.
-fn agent_label(client: &mut Client, team: &str) -> Result<String, Error> {
+fn label_id(client: &mut Client, team: &str, name: &str) -> Result<String, Error> {
     let data = client.request(
         "query($n: String!) { issueLabels(filter: {name: {eq: $n}}) { nodes { id team { id } } } }",
-        json!({"n": LABEL}),
+        json!({"n": name}),
     )?;
     let existing = data
         .pointer("/issueLabels/nodes")
@@ -576,7 +673,7 @@ fn agent_label(client: &mut Client, team: &str) -> Result<String, Error> {
     }
     let data = client.request(
         "mutation($n: String!, $t: String!) { issueLabelCreate(input: {name: $n, teamId: $t}) { success issueLabel { id } } }",
-        json!({"n": LABEL, "t": team}),
+        json!({"n": name, "t": team}),
     )?;
     Ok(text(&data, "/issueLabelCreate/issueLabel/id")?.to_owned())
 }
@@ -599,13 +696,17 @@ mod tests {
 
     #[test]
     fn holder_is_the_latest_claim_not_released_by_its_agent() {
-        assert_eq!(holder(&thread(&[])), None);
-        assert_eq!(holder(&thread(&["claim: a s\nscope: x"])), Some("a"));
-        let lost = thread(&["claim: a s", "claim: b s", "release: b lost"]);
-        assert_eq!(holder(&lost), Some("a"));
-        let forced = thread(&["claim: a s", "release: a forced by b: stale"]);
-        assert_eq!(holder(&forced), None);
-        let handed = thread(&["claim: a s", "release: a done", "claim: b s"]);
-        assert_eq!(holder(&handed), Some("b"));
+        let who = |bodies: &[&str]| holder(&thread(bodies)).map(|(who, _)| who.to_owned());
+        assert_eq!(who(&[]), None);
+        assert_eq!(who(&["claim: a s\nscope: x"]), Some("a".into()));
+        assert_eq!(
+            who(&["claim: a s", "claim: b s", "release: b lost"]),
+            Some("a".into())
+        );
+        assert_eq!(who(&["claim: a s", "release: a forced by b: stale"]), None);
+        assert_eq!(
+            who(&["claim: a s", "release: a done", "claim: b s"]),
+            Some("b".into())
+        );
     }
 }
