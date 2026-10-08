@@ -46,8 +46,8 @@ struct State {
     /// (id, name, team id or none for a workspace label)
     labels: Vec<(String, String, Option<String>)>,
     created: Vec<Value>,
-    /// (id, name, team ids)
-    projects: Vec<(String, String, Vec<String>)>,
+    /// (id, name, team ids, archived, trashed)
+    projects: Vec<(String, String, Vec<String>, bool, bool)>,
     created_projects: Vec<Value>,
     viewer_id: String,
 }
@@ -79,8 +79,20 @@ impl State {
     fn add_project(&mut self, name: &str, teams: &[&str]) -> String {
         let id = format!("p-{}", self.projects.len() + 10);
         let teams = teams.iter().map(|t| (*t).to_owned()).collect();
-        self.projects.push((id.clone(), name.to_owned(), teams));
+        self.projects
+            .push((id.clone(), name.to_owned(), teams, false, false));
         id
+    }
+
+    fn add_archived_project(&mut self, name: &str, teams: &[&str]) {
+        self.add_project(name, teams);
+        self.projects.last_mut().unwrap().3 = true;
+    }
+
+    /// Trashed (deleted) projects are archived too.
+    fn add_trashed_project(&mut self, name: &str, teams: &[&str]) {
+        self.add_archived_project(name, teams);
+        self.projects.last_mut().unwrap().4 = true;
     }
 
     fn answer(&mut self, query: &str, vars: &Value) -> Value {
@@ -99,23 +111,28 @@ impl State {
                 "id": id, "name": name, "url": project_url(&id)}}})
         } else if query.contains("projects(first") {
             // Pages of one, and names compared ignoring case as a collation
-            // might: atb must paginate and compare names itself.
+            // might: atb must paginate and compare names itself. Archived
+            // projects only with includeArchived, as Linear does.
+            let archived = query.contains("includeArchived: true");
             let matching: Vec<_> = self
                 .projects
                 .iter()
                 .filter(|p| p.1.eq_ignore_ascii_case(vars["n"].as_str().unwrap()))
+                .filter(|p| archived || !p.3)
                 .collect();
             let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
             let end = (start + 1).min(matching.len());
             let nodes: Vec<Value> = matching[start..end]
                 .iter()
-                .map(|(id, name, teams)| {
+                .map(|(id, name, teams, archived, trashed)| {
                     let teams: Vec<Value> = teams
                         .iter()
                         .filter(|t| vars["t"] == **t)
                         .map(|t| json!({"id": t}))
                         .collect();
+                    let archived_at = archived.then_some("2026-10-01T00:00:00.000Z");
                     json!({"id": id, "name": name, "url": project_url(id),
+                        "archivedAt": archived_at, "trashed": trashed.then_some(true),
                         "teams": {"nodes": teams}})
                 })
                 .collect();
@@ -1004,4 +1021,47 @@ fn project_create_refuses_a_project_on_another_team_or_several_with_the_name() {
         stderr(&output)
     );
     assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn project_create_refuses_an_archived_project_on_any_team() {
+    for team in ["t-1", "t-2"] {
+        let fake = Fake::start(&[KEY]);
+        fake.state().add_archived_project("Project name", &[team]);
+        let output = create_project(&fake, &[]);
+        assert_eq!(output.status.code(), Some(1), "{team}");
+        assert!(
+            stderr(&output).contains("exists but is archived"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(fake.mutations(), 0);
+    }
+
+    // An archived project counts toward "more than one".
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_project("Project name", &["t-1"]);
+    fake.state().add_archived_project("Project name", &["t-1"]);
+    let output = create_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("2 projects are named"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn project_create_ignores_a_trashed_project_with_the_name() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_trashed_project("Project name", &["t-1"]);
+    let output = create_project(&fake, &["--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"name": "Project name", "url": "https://linear.example/project/p-11",
+            "id": "p-11", "created": true})
+    );
+    assert_eq!(fake.state().created_projects.len(), 1);
 }

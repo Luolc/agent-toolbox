@@ -131,8 +131,9 @@ enum Command {
 enum ProjectCommand {
     /// Create a project on the team and print its name and URL. A project
     /// with exactly this name that is already on the team is printed
-    /// instead, without a change; one that is not on the team, or several
-    /// with the name, is an error and nothing is written
+    /// instead, without a change; one that is archived or not on the team,
+    /// or several with the name (archived ones included), is an error and
+    /// nothing is written. Projects in the trash do not count
     Create {
         /// Team key, such as TEAM
         #[arg(long)]
@@ -702,22 +703,24 @@ struct Project {
     name: String,
     url: String,
     on_team: bool,
+    archived: bool,
 }
 
-/// Every project named exactly `name`, across pages, with whether `team` is
-/// among its teams. The name is compared here as well, so the match is
+/// Every project named exactly `name`, archived ones included and trashed
+/// (deleted) ones left out, across pages, with whether `team` is among its
+/// teams. The name is compared here as well, so the match is
 /// case-sensitive whatever collation the server uses.
 fn projects_named(client: &mut Client, name: &str, team: &str) -> Result<Vec<Project>, Error> {
     let mut all = Vec::new();
     let mut after = Value::Null;
     loop {
         let data = client.request(
-            "query($n: String!, $t: ID!, $after: String) { projects(first: 50, after: $after, filter: {name: {eq: $n}}) { nodes { id name url teams(filter: {id: {eq: $t}}) { nodes { id } } } pageInfo { hasNextPage endCursor } } }",
+            "query($n: String!, $t: ID!, $after: String) { projects(first: 50, after: $after, includeArchived: true, filter: {name: {eq: $n}}) { nodes { id name url archivedAt trashed teams(filter: {id: {eq: $t}}) { nodes { id } } } pageInfo { hasNextPage endCursor } } }",
             json!({"n": name, "t": team, "after": after}),
         )?;
         let page = &data["projects"];
         for node in page["nodes"].as_array().into_iter().flatten() {
-            if text(node, "/name")? != name {
+            if text(node, "/name")? != name || node["trashed"] == true {
                 continue;
             }
             all.push(Project {
@@ -728,6 +731,7 @@ fn projects_named(client: &mut Client, name: &str, team: &str) -> Result<Vec<Pro
                     .pointer("/teams/nodes")
                     .and_then(Value::as_array)
                     .is_some_and(|teams| !teams.is_empty()),
+                archived: !node["archivedAt"].is_null(),
             });
         }
         if page.pointer("/pageInfo/hasNextPage") != Some(&Value::Bool(true)) {
@@ -762,6 +766,14 @@ fn create_project(
         )));
     }
     let (project, created) = match existing.pop() {
+        // Exit 0 would tell the caller to file work into an archived project.
+        Some(project) if project.archived => {
+            return Err(usage(format!(
+                "project {name:?} exists but is archived ({}); nothing created: \
+                 unarchive it in Linear or choose another name",
+                project.url
+            )));
+        }
         Some(project) if project.on_team => {
             client.note(&format!(
                 "project {name:?} already exists on team {team_key}; nothing created"
@@ -789,6 +801,7 @@ fn create_project(
                 name: text(&data, "/projectCreate/project/name")?.to_owned(),
                 url: text(&data, "/projectCreate/project/url")?.to_owned(),
                 on_team: true,
+                archived: false,
             };
             (project, true)
         }
