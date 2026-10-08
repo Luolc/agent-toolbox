@@ -49,6 +49,24 @@ An empty variable counts as unset. The Codex fallback reads `sessions/` under th
 
 Every request honours the standard proxy variables. The first valid one of `ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` wins, in that order, and the lowercase spellings are accepted too. `NO_PROXY` lists the hosts that bypass the proxy. An HTTP `CONNECT` proxy is what has been tested.
 
+## `atb linear`
+
+```sh
+atb linear claim <ISSUE> --agent <name> --source <source> --scope '<repo>: <paths>'
+atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [--done | --todo]
+atb linear create --team <KEY> [--project <name>] --title <title> --description-file <file> [--json]
+atb linear query <GRAPHQL | FILE>
+```
+
+Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; creates issues labelled `agent`; runs read-only GraphQL queries (a document with a mutation or subscription is refused before it is sent). The protocol, the exit statuses (3: claim lost, 4: release refused) and example queries are in [`.agents/skills/linear/SKILL.md`](.agents/skills/linear/SKILL.md).
+
+The API key comes from the environment, never from a flag:
+
+1. `LINEAR_API_KEY`: the key itself.
+2. `LINEAR_API_KEY_CMD`: a command that prints the key, such as a secret manager's read command. It runs through `sh -c` and its stderr is discarded. The output is cached for 24 hours in `$XDG_CONFIG_HOME/linear/api-key` (default `~/.config/linear/api-key`, under `$ATB_HOME` if set), mode 0600 in a 0700 directory; an existing directory is tightened to 0700. On a 401 the command runs once more and the request is retried once.
+
+`LINEAR_API_URL` overrides the endpoint (`https://api.linear.app/graphql`). Each request has a 30 s timeout and follows no redirects.
+
 ## Build
 
 ```sh
