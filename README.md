@@ -55,10 +55,11 @@ Every request honours the standard proxy variables. The first valid one of `ALL_
 atb linear claim <ISSUE> --agent <name> --source <source> --scope '<repo>: <paths>'
 atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [--done | --todo]
 atb linear create --team <KEY> [--project <name>] --title <title> --description-file <file> [--label <name>]... [--json]
+atb linear project create --team <KEY> --name <name> [--description-file <file>] [--json]
 atb linear query <GRAPHQL | FILE>
 ```
 
-Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; creates issues; runs read-only GraphQL queries (a document with a mutation or subscription is refused before it is sent). The protocol, the exit statuses (3: claim lost, 4: release refused) and example queries are in [`.agents/skills/linear/SKILL.md`](.agents/skills/linear/SKILL.md).
+Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; creates issues; creates a project unless one with the name exists (a same-named project that is archived, on another team, or one of several is an error and nothing is written; one in the trash does not count); runs read-only GraphQL queries (a document with a mutation or subscription is refused before it is sent). The protocol, the exit statuses (3: claim lost, 4: release refused) and example queries are in [`.agents/skills/linear/SKILL.md`](.agents/skills/linear/SKILL.md).
 
 The API key comes from the environment, never from a flag:
 

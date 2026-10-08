@@ -1,6 +1,6 @@
 ---
 name: linear
-description: Claim and release Linear issues with `atb linear`, create issues, and run read-only GraphQL queries. Use before an agent starts work on a repository whose Linear issue it must claim, when it finishes or gives up (release), when it files a new issue for agent work, and to look up issues by assignee, label or state.
+description: Claim and release Linear issues with `atb linear`, create issues and projects, and run read-only GraphQL queries. Use before an agent starts work on a repository whose Linear issue it must claim, when it finishes or gives up (release), when it files a new issue or creates a project for agent work, and to look up issues by assignee, label or state.
 ---
 
 # Linear claims and queries
@@ -29,18 +29,20 @@ atb linear release ABC-123 --agent docs-impl --reason merged --done
 atb linear release ABC-123 --agent docs-impl --reason 'blocked on review'
 atb linear release ABC-123 --agent my-orchestra --force 'stale for three days, holder gone'
 atb linear create --team TEAM --project 'Project name' --title 'Short title' --description-file body.md --label bug
+atb linear project create --team TEAM --name 'Project name' --description-file overview.md
 atb linear query '{ viewer { id } }'
 ```
 
 - `<ISSUE>` is the Linear identifier, such as `ABC-123`.
 - `release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the current holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment comes first, then the state. When refused, nothing is written and the state is unchanged. `--todo` is deprecated: it is accepted so that 0.2.0 callers keep working and does nothing, restoring is the default.
 - `create` resolves the team by key and the project by name within that team (missing or ambiguous: error) and prints `<identifier> <url>`, or JSON with `--json`. It adds the labels given with `--label <name>` (repeatable) and those in `default_labels` of the config file, each once; a label that is neither a workspace label nor the team's own is created on the team. With no labels, the issue has none.
+- `project create` is idempotent by name: it looks up every project named exactly `<name>` (case-sensitive), archived ones included and projects in the trash left out, and writes only when there is none. None: it creates the project on the team, with the file's Markdown as the project's content (the long body; Linear's short `description` stays empty), and prints `<name> <url>`. Exactly one, on the team: it prints that project and changes nothing (a note on stderr says it already existed). One that is archived, whether on the team or not: exit 1, nothing written; unarchive it in Linear or choose another name (exit 0 would mean filing work into an archived project). One that is not on the team, or more than one, archived ones counted: exit 1, nothing written; the team is never added to an existing project. A project in the trash (deleted) does not count, so a deleted name can be created again. `--json` prints `{"name", "url", "id", "created"}`, where `created` is false for an existing project. Run it again after any failure: it never creates a second project with the name.
 - `query` takes a file path if such a file exists, otherwise the query text, and prints the response's `data` as JSON. It is read-only: a document containing a `mutation` or `subscription` operation is refused before anything is sent.
 
 | Exit status | Meaning |
 |---|---|
 | 0 | Success (`claim`: the issue is yours) |
-| 1 | Error: no key, issue not found, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
+| 1 | Error: no key, issue not found, a project with the name is archived, off the team or exists more than once, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
 | 2 | Usage error, or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
 | 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written, leave the issue alone |
 | 4 | `release` refused: the issue has no holder, or the holder is another agent and `--force` was not given |
