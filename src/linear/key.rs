@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
+use serde_json::Value;
+
 use crate::common::{Context, Error, Secret, usage};
 
 pub const KEY_VAR: &str = "LINEAR_API_KEY";
@@ -98,6 +100,19 @@ impl Key {
     pub fn mask(&self, text: &str) -> String {
         let candidates: Vec<&str> = self.seen.iter().map(Secret::expose).collect();
         mask(&candidates, text)
+    }
+
+    /// Every string in `value`, object keys included, masked.
+    pub fn mask_json(&self, value: &Value) -> Value {
+        match value {
+            Value::String(text) => Value::String(self.mask(text)),
+            Value::Array(items) => items.iter().map(|v| self.mask_json(v)).collect(),
+            Value::Object(map) => map
+                .iter()
+                .map(|(k, v)| (self.mask(k), self.mask_json(v)))
+                .collect(),
+            other => other.clone(),
+        }
     }
 }
 

@@ -43,6 +43,7 @@ struct State {
     /// (id, team id or none for a workspace label)
     labels: Vec<(String, Option<String>)>,
     created: Vec<Value>,
+    viewer_id: String,
 }
 
 impl State {
@@ -120,7 +121,7 @@ impl State {
             json!({"issue": {"id": "i-1", "identifier": ISSUE,
                 "team": {"states": {"nodes": states}}}})
         } else if query.contains("viewer") {
-            json!({"viewer": {"id": "u-1"}})
+            json!({"viewer": {"id": self.viewer_id}})
         } else {
             panic!("the fake server does not know {query}");
         }
@@ -144,6 +145,7 @@ impl Fake {
             comments: Vec::new(),
             labels: Vec::new(),
             created: Vec::new(),
+            viewer_id: "u-1".into(),
         }));
         let shared = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -246,7 +248,11 @@ fn atb(args: &[&str], env: &[(&str, &str)]) -> Output {
     }
     let output = command.output().unwrap();
     for key in [KEY, NEW_KEY] {
-        assert!(!stdout(&output).contains(key), "key in stdout");
+        assert!(
+            !stdout(&output).contains(key),
+            "key in stdout: {}",
+            stdout(&output)
+        );
         assert!(
             !stderr(&output).contains(key),
             "key in stderr: {}",
@@ -624,6 +630,38 @@ fn create_uses_an_existing_workspace_label() {
     assert_eq!(stdout(&output).trim(), "ABC-9 https://linear.example/ABC-9");
     assert_eq!(fake.state().created[0]["labelIds"], json!(["l-ws"]));
     assert_eq!(fake.first("issueLabelCreate"), None);
+}
+
+#[test]
+fn a_key_echoed_by_the_server_is_masked_on_stdout_and_stderr() {
+    // atb() itself fails the test if a key reaches stdout or stderr.
+    let fake = Fake::start(&[KEY]);
+    fake.state().viewer_id = format!("prefix {KEY} suffix");
+    let output = linear(&fake, &["query", "{ viewer { id } }"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"viewer": {"id": "prefix *** suffix"}})
+    );
+
+    fake.state().add_comment(&format!("claim: {KEY} thread-2"));
+    let output = linear(
+        &fake,
+        &["release", ISSUE, "--agent", "agent-a", "--reason", "merged"],
+    );
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("held by ***"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = linear(
+        &fake,
+        &["release", ISSUE, "--agent", "agent-a", "--force", "stale"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "released ABC-123 (held by ***)");
 }
 
 #[test]

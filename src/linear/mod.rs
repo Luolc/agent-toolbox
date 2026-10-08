@@ -168,10 +168,6 @@ pub fn run(args: Args) -> Result<u8, Error> {
     })
 }
 
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).expect("a JSON value always serializes")
-}
-
 /// The query text (from the file if `arg` names one), refused unless every
 /// operation in it is a query.
 fn read_only_query(arg: &str) -> Result<String, Error> {
@@ -200,7 +196,7 @@ fn read_only_query(arg: &str) -> Result<String, Error> {
 
 fn run_query(client: &mut Client, query: &str) -> Result<u8, Error> {
     let data = client.request(query, json!({}))?;
-    println!("{}", pretty(&data));
+    client.print_json(&data);
     Ok(0)
 }
 
@@ -209,7 +205,27 @@ struct Client {
     key: Key,
 }
 
+/// Everything `linear` prints goes through these, masked against every key
+/// held during the run: Linear's data and the comments it echoes are text
+/// this binary does not control.
 impl Client {
+    fn print(&self, line: &str) {
+        println!("{}", self.key.mask(line));
+    }
+
+    fn note(&self, line: &str) {
+        eprintln!("{}", self.key.mask(line));
+    }
+
+    /// JSON masked value by value, so the output stays valid JSON.
+    fn print_json(&self, value: &Value) {
+        let masked = self.key.mask_json(value);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&masked).expect("a JSON value always serializes")
+        );
+    }
+
     /// One GraphQL request, returning `data`. The only retry anywhere in this
     /// binary: on a 401 with a key from LINEAR_API_KEY_CMD, the key is fetched
     /// again and this request is sent once more.
@@ -431,20 +447,20 @@ fn claim(
         Ok(winner)
     });
     let winner = checked.inspect_err(|_| {
-        eprintln!(
+        client.note(&format!(
             "note: the claim comment on {} was written, but the conflict check did not finish",
             issue.identifier
-        );
+        ));
     })?;
     if let Some(winner) = winner {
         comment(client, &issue, &format!("release: {agent} lost"))?;
-        eprintln!(
+        client.note(&format!(
             "{} is held by {winner}, who claimed it first; wrote `release: {agent} lost`",
             issue.identifier
-        );
+        ));
         return Ok(EXIT_CLAIM_LOST);
     }
-    println!("claimed {}", issue.identifier);
+    client.print(&format!("claimed {}", issue.identifier));
     Ok(0)
 }
 
@@ -463,20 +479,20 @@ fn release(
     let issue = issue_info(client, ident)?;
     let all = comments(client, &issue)?;
     let Some(holder) = holder(&all) else {
-        eprintln!(
+        client.note(&format!(
             "{} has no holder; nothing written, state unchanged",
             issue.identifier
-        );
+        ));
         return Ok(EXIT_RELEASE_REFUSED);
     };
     let body = match &why {
         Why::Force(why) => format!("release: {holder} forced by {agent}: {why}"),
         Why::Reason(_) if holder != agent => {
-            eprintln!(
+            client.note(&format!(
                 "{} is held by {holder}, not {agent}; nothing written, state unchanged \
                  (--force releases another agent's claim)",
                 issue.identifier
-            );
+            ));
             return Ok(EXIT_RELEASE_REFUSED);
         }
         Why::Reason(reason) => format!("release: {agent} {reason}"),
@@ -486,7 +502,7 @@ fn release(
     if let Some(state) = state {
         set_state(client, &issue, state)?;
     }
-    println!("released {} (held by {holder})", issue.identifier);
+    client.print(&format!("released {} (held by {holder})", issue.identifier));
     Ok(0)
 }
 
@@ -535,9 +551,9 @@ fn create(
     let identifier = text(&data, "/issueCreate/issue/identifier")?;
     let url = text(&data, "/issueCreate/issue/url")?;
     if as_json {
-        println!("{}", pretty(&json!({"identifier": identifier, "url": url})));
+        client.print_json(&json!({"identifier": identifier, "url": url}));
     } else {
-        println!("{identifier} {url}");
+        client.print(&format!("{identifier} {url}"));
     }
     Ok(0)
 }
