@@ -365,13 +365,16 @@ fn claim_sets_the_started_state_and_writes_three_lines() {
 #[test]
 fn claim_picks_the_started_state_with_the_lowest_position_then_name() {
     let fake = Fake::start(&[KEY]);
-    // List or name order would pick Alpha; position alone would pick Working.
+    // List or name order would pick Alpha; position, then id, would pick Working.
     fake.state().set_states(&[
         ("Todo", "unstarted", 0.0),
         ("Alpha", "started", 3.0),
         ("Working", "started", 1.0),
         ("Doing", "started", 1.0),
     ]);
+    // Ids that sort the other way round, so only the name breaks the tie.
+    fake.state().states[2].0 = "s-1".into();
+    fake.state().states[3].0 = "s-2".into();
     let output = claim(&fake, "agent-a");
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(fake.state().issue_state, "Doing");
