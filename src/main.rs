@@ -30,8 +30,8 @@ enum Tool {
     /// reset times. These are not token ledgers and not bills.
     Quota(quota::Args),
     /// Claim and release Linear issues by comment, write comments, create
-    /// issues and projects for agents, put an issue into a project, relate
-    /// two issues, and run read-only GraphQL queries.
+    /// and edit issues, create projects for agents, put an issue into a
+    /// project, relate two issues, and run read-only GraphQL queries.
     Linear(linear::Args),
 }
 

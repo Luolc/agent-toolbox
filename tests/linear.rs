@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 const KEY: &str = "synthetic-linear-key-not-a-credential";
 const NEW_KEY: &str = "synthetic-linear-key-not-a-credential-rotated";
 const ISSUE: &str = "ABC-123";
+const ISSUE_URL: &str = "https://linear.example/ABC-123";
 /// A second issue on the same team, id `i-2`, for `relate`.
 const OTHER: &str = "ABC-124";
 
@@ -58,6 +59,8 @@ struct State {
     issue_project: Option<String>,
     /// (issue id, related issue id, type)
     relations: Vec<(String, String, String)>,
+    issue_title: String,
+    issue_description: Option<String>,
 }
 
 impl State {
@@ -169,6 +172,15 @@ impl State {
                 "hasNextPage": end < matching.len(),
                 "endCursor": end.to_string(),
             }}})
+        } else if query.contains("IssueUpdateInput") {
+            let input = &vars["i"];
+            if let Some(title) = input["title"].as_str() {
+                self.issue_title = title.to_owned();
+            }
+            if let Some(description) = input["description"].as_str() {
+                self.issue_description = Some(description.to_owned());
+            }
+            json!({"issueUpdate": {"success": true}})
         } else if query.contains("issueUpdate") && query.contains("projectId") {
             self.issue_project = Some(vars["p"].as_str().unwrap().to_owned());
             json!({"issueUpdate": {"success": true}})
@@ -291,7 +303,8 @@ impl State {
                 .find(|s| s.1 == self.issue_state)
                 .unwrap()
                 .2;
-            json!({"issue": {"id": "i-1", "identifier": ISSUE,
+            json!({"issue": {"id": "i-1", "identifier": ISSUE, "url": ISSUE_URL,
+                "title": self.issue_title, "description": self.issue_description,
                 "state": {"name": self.issue_state, "type": kind}, "project": project,
                 "team": {"id": "t-1", "key": "TEAM", "states": {"nodes": states}}}})
         } else if query.contains("viewer") {
@@ -330,6 +343,8 @@ impl Fake {
             viewer_id: "u-1".into(),
             issue_project: None,
             relations: Vec::new(),
+            issue_title: "Old title".into(),
+            issue_description: None,
         };
         state.set_states(&[
             ("Backlog", "backlog", 0.0),
@@ -1673,4 +1688,136 @@ fn release_without_a_holder_is_not_a_resume_unless_its_own_release_is_latest_and
         assert_eq!(fake.mutations(), 0);
         assert_eq!(fake.state().issue_state, state);
     }
+}
+
+fn edit(fake: &Fake, extra: &[&str]) -> Output {
+    let mut args = vec!["edit", ISSUE];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
+
+/// The inputs of the edits sent so far.
+fn edits(fake: &Fake) -> Vec<Value> {
+    let state = fake.state();
+    state
+        .requests
+        .iter()
+        .filter(|r| r.query.starts_with("mutation"))
+        .map(|r| {
+            assert!(r.query.contains("issueUpdate"), "{}", r.query);
+            r.variables["i"].clone()
+        })
+        .collect()
+}
+
+#[test]
+fn edit_sends_only_the_fields_given_and_the_description_verbatim() {
+    let fake = Fake::start(&[KEY]);
+    let output = edit(&fake, &["--title", " New title "]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{ISSUE} {ISSUE_URL}\n"));
+    assert_eq!(edits(&fake), [json!({"title": " New title "})]);
+
+    let fake = Fake::start(&[KEY]);
+    let body = "  Status: open\n\nclaim: on the first line needs nothing special\n\n";
+    let file = fake.home.join("description.md");
+    fs::write(&file, body).unwrap();
+    let file = file.to_str().unwrap();
+    let output = edit(&fake, &["--description-file", file, "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": true})
+    );
+    assert_eq!(edits(&fake), [json!({"description": body})]);
+    assert_eq!(fake.state().issue_title, "Old title");
+
+    let fake = Fake::start(&[KEY]);
+    let output = edit(&fake, &["--title", "T", "--description-file", file]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(edits(&fake), [json!({"title": "T", "description": body})]);
+}
+
+#[test]
+fn edit_with_the_current_values_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().issue_description = Some("Body\n".into());
+    let file = fake.home.join("description.md");
+    fs::write(&file, "Body\n").unwrap();
+    let file = file.to_str().unwrap();
+    for extra in [
+        &["--title", "Old title"][..],
+        &["--description-file", file],
+        &["--title", "Old title", "--description-file", file, "--json"],
+    ] {
+        let output = edit(&fake, extra);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("nothing written"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let output = edit(&fake, &["--title", "Old title", "--json"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": false})
+    );
+    assert_eq!(fake.mutations(), 0);
+
+    // Compared exactly: one more newline is a change.
+    fs::write(file, "Body\n\n").unwrap();
+    let output = edit(&fake, &["--title", "Old title", "--description-file", file]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        edits(&fake),
+        [json!({"title": "Old title", "description": "Body\n\n"})]
+    );
+}
+
+#[test]
+fn edit_of_a_missing_issue_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    let output = linear(&fake, &["edit", "ABC-404", "--title", "T"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no issue ABC-404"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn edit_refuses_no_change_or_an_empty_title_or_description_before_any_request() {
+    let fake = Fake::start(&[KEY]);
+    let output = edit(&fake, &[]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let file = fake.home.join("description.md");
+    let path = file.to_str().unwrap();
+    for (title, description) in [(" \t", "Body"), ("T", ""), ("T", " \n\t\n")] {
+        fs::write(&file, description).unwrap();
+        let output = edit(&fake, &["--title", title, "--description-file", path]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{title:?} {description:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("nothing sent"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let missing = fake.home.join("missing.md");
+    let output = edit(&fake, &["--description-file", missing.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(fake.state().requests.is_empty());
+
+    // Refused before the key is read: the key command never runs.
+    let cmd = KeyCommand::new("key-edit-refused", KEY);
+    let output = cmd.run(&fake, &["linear", "edit", ISSUE, "--title", " "]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(cmd.runs(), 0);
 }
