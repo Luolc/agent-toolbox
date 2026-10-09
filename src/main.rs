@@ -29,8 +29,8 @@ enum Tool {
     /// Subscription quota as the vendor reports it: window percentages and
     /// reset times. These are not token ledgers and not bills.
     Quota(quota::Args),
-    /// Claim and release Linear issues by comment, create issues and projects
-    /// for agents, and run read-only GraphQL queries.
+    /// Claim and release Linear issues by comment, write comments, create
+    /// issues and projects for agents, and run read-only GraphQL queries.
     Linear(linear::Args),
 }
 

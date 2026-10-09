@@ -1,5 +1,6 @@
-//! `atb linear <command>`: claim and release Linear issues by comment, create
-//! issues and projects for agents, and run read-only GraphQL queries.
+//! `atb linear <command>`: claim and release Linear issues by comment, write
+//! comments, create issues and projects for agents, and run read-only GraphQL
+//! queries.
 
 mod config;
 mod document;
@@ -14,13 +15,15 @@ use serde_json::{Value, json};
 use crate::common::{Context, Error, Headers, http_post_json, usage};
 use config::Config;
 use key::Key;
-use states::{BACKLOG, COMPLETED, STARTED, State, UNSTARTED};
+use states::{ABANDONED, BACKLOG, CANCELED, COMPLETED, STARTED, State, UNSTARTED};
 
 const API_URL: &str = "https://api.linear.app/graphql";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const EXIT_CLAIM_LOST: u8 = 3;
 pub const EXIT_RELEASE_REFUSED: u8 = 4;
+/// A comment body refused before the key is read, as for a usage error.
+const EXIT_BODY_REFUSED: u8 = 2;
 
 const AFTER_HELP: &str = "\
 Key sources, highest first:
@@ -39,11 +42,14 @@ name) for claim, the first `completed` for release --done. The optional
 config file $XDG_CONFIG_HOME/linear/config.json, beside the key cache, holds
 {\"states\": {\"<type>\": \"<state name>\", ...}, \"default_labels\": [...]}:
 the state to use for a type instead of the first, and labels create adds.
+release --abandon sets the state named by \"states\": {\"abandoned\": ...},
+which must be of type `canceled`; without that entry it is an error.
 
-Exit status: 0 on success, 1 on error, 2 on a usage error or when Linear
-answers 429 (the retry-after value is printed; nothing is retried), 3 when a
-claim lost to an earlier claim, 4 when a release was refused (no holder, or
-the holder is another agent).";
+Exit status: 0 on success, 1 on error, 2 on a usage error (including a
+comment body that is empty or starts with `claim:` or `release:`) or when
+Linear answers 429 (the retry-after value is printed; nothing is retried), 3
+when a claim lost to an earlier claim, 4 when a release was refused (no
+holder, or the holder is another agent).";
 
 #[derive(clap::Args)]
 #[command(after_help = AFTER_HELP)]
@@ -70,8 +76,9 @@ enum Command {
         scope: String,
     },
     /// Write a release comment for the current holder, then restore the
-    /// state from before the claim, or set the first completed state with
-    /// --done; exit 4 if refused
+    /// state from before the claim, set the first completed state with
+    /// --done, or the configured abandoned state with --abandon; exit 4 if
+    /// refused
     #[command(group = clap::ArgGroup::new("why").required(true))]
     Release {
         /// Issue identifier, such as ABC-123
@@ -88,10 +95,31 @@ enum Command {
         /// Set the first completed state instead of restoring the prior one
         #[arg(long, conflicts_with = "todo")]
         done: bool,
+        /// End the attempt as abandoned: the comment reads `release: <agent>
+        /// abandoned: <reason>` (with --force, as for any forced release),
+        /// then the state named by `states.abandoned` in the config, which
+        /// must be of type canceled, is set. Without that entry, or if the
+        /// state is missing or of another type, nothing is written
+        #[arg(long, conflicts_with = "done")]
+        abandon: bool,
         /// Deprecated, accepted for 0.2.0 callers: does nothing, restoring
         /// the prior state is the default
         #[arg(long)]
         todo: bool,
+    },
+    /// Write a comment with the file's content, verbatim, and print its URL.
+    /// A body that is empty or whose first line starts with `claim:` or
+    /// `release:` is refused (exit 2) before anything is sent: those come
+    /// only from claim and release
+    Comment {
+        /// Issue identifier, such as ABC-123
+        issue: String,
+        /// Markdown for the comment, sent as it is
+        #[arg(long, value_name = "FILE")]
+        body_file: PathBuf,
+        /// Print the comment's id and URL as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Run a read-only GraphQL query and print its `data` as JSON; mutations
     /// and subscriptions are refused before anything is sent
@@ -100,31 +128,38 @@ enum Command {
         graphql: String,
     },
     /// Create an issue with the labels from --label and the config's
-    /// default_labels (a missing label is created on the team), and print
-    /// its identifier and URL
-    Create {
-        /// Team key, such as TEAM
-        #[arg(long)]
-        team: String,
-        /// Project name within the team
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(long)]
-        title: String,
-        #[arg(long, value_name = "FILE")]
-        description_file: PathBuf,
-        /// A label to add; repeatable
-        #[arg(long = "label", value_name = "NAME")]
-        labels: Vec<String>,
-        /// Print the identifier and URL as JSON
-        #[arg(long)]
-        json: bool,
-    },
+    /// default_labels (a missing label is created on the team), optionally as
+    /// a sub-issue of --parent, and print its identifier and URL
+    Create(CreateArgs),
     /// Projects: create
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+}
+
+#[derive(clap::Args)]
+struct CreateArgs {
+    /// Team key, such as TEAM
+    #[arg(long)]
+    team: String,
+    /// Project name within the team
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long)]
+    title: String,
+    #[arg(long, value_name = "FILE")]
+    description_file: PathBuf,
+    /// A label to add; repeatable
+    #[arg(long = "label", value_name = "NAME")]
+    labels: Vec<String>,
+    /// Create the issue as a sub-issue of this one, such as ABC-123; the
+    /// parent may be on another team than --team
+    #[arg(long, value_name = "ISSUE")]
+    parent: Option<String>,
+    /// Print the identifier and URL as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -161,6 +196,17 @@ pub fn run(args: Args) -> Result<u8, Error> {
         Command::Query { graphql } => Some(read_only_query(graphql)?),
         _ => None,
     };
+    // Likewise a comment body: read and checked before the key.
+    let body = match &args.command {
+        Command::Comment { body_file, .. } => match comment_body(body_file)? {
+            Ok(body) => Some(body),
+            Err(why) => {
+                eprintln!("error: {why}; nothing written");
+                return Ok(EXIT_BODY_REFUSED);
+            }
+        },
+        _ => None,
+    };
     let config = match &args.command {
         Command::Query { .. } => Config::default(),
         _ => Config::load(&config_dir(&ctx)?.join("config.json"))?,
@@ -187,36 +233,32 @@ pub fn run(args: Args) -> Result<u8, Error> {
             reason,
             force,
             done,
+            abandon,
             todo: _,
         } => {
             let why = match force {
                 Some(why) => Why::Force(why),
                 None => Why::Reason(reason.expect("clap requires --reason or --force")),
             };
-            release(&mut client, &config, &issue, &agent, why, done)
+            let end = match (done, abandon) {
+                (true, _) => End::Done,
+                (_, true) => End::Abandon,
+                _ => End::Restore,
+            };
+            release(&mut client, &config, &issue, &agent, why, end)
         }
-        Command::Query { .. } => run_query(&mut client, &query.expect("read before the key")),
-        Command::Create {
-            team,
-            project,
-            title,
-            description_file,
-            labels,
+        Command::Comment { issue, json, .. } => write_comment(
+            &mut client,
+            &issue,
+            &body.expect("read before the key"),
             json,
-        } => {
-            let mut all = labels;
-            all.extend(config.default_labels);
+        ),
+        Command::Query { .. } => run_query(&mut client, &query.expect("read before the key")),
+        Command::Create(mut args) => {
+            args.labels.extend(config.default_labels);
             let mut seen = std::collections::HashSet::new();
-            all.retain(|label| seen.insert(label.clone()));
-            create(
-                &mut client,
-                &team,
-                project.as_deref(),
-                &title,
-                &description_file,
-                &all,
-                json,
-            )
+            args.labels.retain(|label| seen.insert(label.clone()));
+            create(&mut client, &args)
         }
         Command::Project {
             command:
@@ -268,6 +310,43 @@ fn read_only_query(arg: &str) -> Result<String, Error> {
         ));
     }
     Ok(text)
+}
+
+/// The file's content, or why it is refused as a comment body. An unreadable
+/// file is an error. The check looks past leading whitespace, since a server
+/// that trims the body would otherwise turn it into a claim or release.
+fn comment_body(path: &Path) -> Result<Result<String, String>, Error> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|err| usage(format!("cannot read {}: {err}", path.display())))?;
+    let start = body.trim_start();
+    if start.is_empty() {
+        return Ok(Err(format!("{} is empty", path.display())));
+    }
+    if let Some(word) = ["claim:", "release:"]
+        .into_iter()
+        .find(|word| start.starts_with(word))
+    {
+        return Ok(Err(format!(
+            "the comment starts with `{word}`; only claim and release write those"
+        )));
+    }
+    Ok(Ok(body))
+}
+
+fn write_comment(client: &mut Client, ident: &str, body: &str, as_json: bool) -> Result<u8, Error> {
+    let issue = issue_info(client, ident)?;
+    let data = client.request(
+        "mutation($id: String!, $b: String!) { commentCreate(input: {issueId: $id, body: $b}) { success comment { id url } } }",
+        json!({"id": issue.id, "b": body}),
+    )?;
+    let id = text(&data, "/commentCreate/comment/id")?;
+    let url = text(&data, "/commentCreate/comment/url")?;
+    if as_json {
+        client.print_json(&json!({"id": id, "url": url}));
+    } else {
+        client.print(url);
+    }
+    Ok(0)
 }
 
 fn run_query(client: &mut Client, query: &str) -> Result<u8, Error> {
@@ -594,15 +673,49 @@ fn prior_state<'a>(issue: &'a Issue, claim: &str, config: &Config) -> Result<&'a
     )))
 }
 
+/// The state a release leaves the issue in.
+enum End {
+    Restore,
+    Done,
+    Abandon,
+}
+
+/// The state named by `states.abandoned`, which must be a team state of type
+/// `canceled`. There is no default: picking a canceled state by position
+/// could mark the attempt with a state the team uses for something else.
+fn abandoned_state<'a>(issue: &'a Issue, config: &Config) -> Result<&'a State, Error> {
+    let Some(name) = config.states.get(ABANDONED) else {
+        return Err(usage(format!(
+            "release --abandon needs the abandoned state: set \"states\": {{\"{ABANDONED}\": \
+             \"<state name>\"}} in the config file to a {CANCELED} state; nothing written"
+        )));
+    };
+    match issue.states.iter().find(|s| &s.name == name) {
+        Some(state) if state.kind == CANCELED => Ok(state),
+        Some(state) => Err(usage(format!(
+            "the config's {ABANDONED} state {name:?} is of type {}, not {CANCELED}; nothing written",
+            state.kind
+        ))),
+        None => Err(usage(format!(
+            "the team of {} has no state {name:?} (the config's {ABANDONED} state); nothing written",
+            issue.identifier
+        ))),
+    }
+}
+
 fn release(
     client: &mut Client,
     config: &Config,
     ident: &str,
     agent: &str,
     why: Why,
-    done: bool,
+    end: End,
 ) -> Result<u8, Error> {
     let issue = issue_info(client, ident)?;
+    let abandoned = match end {
+        End::Abandon => Some(abandoned_state(&issue, config)?),
+        _ => None,
+    };
     let all = comments(client, &issue)?;
     let Some((holder, claim)) = holder(&all) else {
         client.note(&format!(
@@ -621,33 +734,55 @@ fn release(
             ));
             return Ok(EXIT_RELEASE_REFUSED);
         }
+        Why::Reason(reason) if abandoned.is_some() => {
+            format!("release: {agent} abandoned: {reason}")
+        }
         Why::Reason(reason) => format!("release: {agent} {reason}"),
     };
     let (holder, claim) = (holder.to_owned(), claim.to_owned());
     comment(client, &issue, &body)?;
-    let state = if done {
-        issue.state_of_type(COMPLETED, config)?
-    } else {
-        prior_state(&issue, &claim, config)?
+    let state = match (end, abandoned) {
+        (_, Some(state)) => state,
+        (End::Done, _) => issue.state_of_type(COMPLETED, config)?,
+        _ => prior_state(&issue, &claim, config)?,
     };
     set_state(client, &issue, state)?;
     client.print(&format!("released {} (held by {holder})", issue.identifier));
     Ok(0)
 }
 
-fn create(
-    client: &mut Client,
-    team_key: &str,
-    project: Option<&str>,
-    title: &str,
-    description_file: &Path,
-    labels: &[String],
-    as_json: bool,
-) -> Result<u8, Error> {
+/// `args.labels` already holds the config's default labels, each once.
+fn create(client: &mut Client, args: &CreateArgs) -> Result<u8, Error> {
+    let CreateArgs {
+        team: team_key,
+        project,
+        title,
+        description_file,
+        labels,
+        parent,
+        json: as_json,
+    } = args;
     let description = std::fs::read_to_string(description_file)
         .map_err(|err| usage(format!("cannot read {}: {err}", description_file.display())))?;
+    // Before any label is created: a missing parent writes nothing.
+    let parent = parent
+        .as_deref()
+        .map(|ident| {
+            let data = client.request(
+                "query($id: String!) { issue(id: $id) { id } }",
+                json!({"id": ident}),
+            )?;
+            data.pointer("/issue/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| usage(format!("no parent issue {ident}; nothing created")))
+        })
+        .transpose()?;
     let team = team_id(client, team_key)?;
     let mut input = json!({"teamId": team, "title": title, "description": description});
+    if let Some(parent) = parent {
+        input["parentId"] = parent.into();
+    }
     if let Some(name) = project {
         let data = client.request(
             "query($t: String!, $n: String!) { team(id: $t) { projects(filter: {name: {eq: $n}}) { nodes { id } } } }",
@@ -679,7 +814,7 @@ fn create(
     )?;
     let identifier = text(&data, "/issueCreate/issue/identifier")?;
     let url = text(&data, "/issueCreate/issue/url")?;
-    if as_json {
+    if *as_json {
         client.print_json(&json!({"identifier": identifier, "url": url}));
     } else {
         client.print(&format!("{identifier} {url}"));
@@ -868,6 +1003,7 @@ mod tests {
             Some("a".into())
         );
         assert_eq!(who(&["claim: a s", "release: a forced by b: stale"]), None);
+        assert_eq!(who(&["claim: a s", "release: a abandoned: stuck"]), None);
         assert_eq!(
             who(&["claim: a s", "release: a done", "claim: b s"]),
             Some("b".into())

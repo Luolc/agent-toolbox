@@ -8,7 +8,11 @@ pub const STARTED: &str = "started";
 pub const COMPLETED: &str = "completed";
 pub const UNSTARTED: &str = "unstarted";
 pub const BACKLOG: &str = "backlog";
-pub const TYPES: [&str; 5] = [BACKLOG, UNSTARTED, STARTED, COMPLETED, "canceled"];
+pub const CANCELED: &str = "canceled";
+pub const TYPES: [&str; 5] = [BACKLOG, UNSTARTED, STARTED, COMPLETED, CANCELED];
+/// The config key under `states` that names the state `release --abandon`
+/// sets; not a type, and never chosen by position.
+pub const ABANDONED: &str = "abandoned";
 
 pub struct State {
     pub id: String,
