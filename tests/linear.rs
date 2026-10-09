@@ -1814,4 +1814,10 @@ fn edit_refuses_no_change_or_an_empty_title_or_description_before_any_request() 
     let output = edit(&fake, &["--description-file", missing.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(fake.state().requests.is_empty());
+
+    // Refused before the key is read: the key command never runs.
+    let cmd = KeyCommand::new("key-edit-refused", KEY);
+    let output = cmd.run(&fake, &["linear", "edit", ISSUE, "--title", " "]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(cmd.runs(), 0);
 }
