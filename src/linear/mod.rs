@@ -1,6 +1,6 @@
 //! `atb linear <command>`: claim and release Linear issues by comment, write
-//! comments, create issues and projects for agents, put an issue into a
-//! project, relate two issues, and run read-only GraphQL queries.
+//! comments, create and edit issues, create projects for agents, put an issue
+//! into a project, relate two issues, and run read-only GraphQL queries.
 
 mod config;
 mod document;
@@ -22,7 +22,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const EXIT_CLAIM_LOST: u8 = 3;
 pub const EXIT_RELEASE_REFUSED: u8 = 4;
-/// A comment body refused before the key is read, as for a usage error.
+/// A comment body or an edit refused before the key is read, as for a usage
+/// error.
 const EXIT_BODY_REFUSED: u8 = 2;
 /// `relate` given one issue twice, as for a usage error.
 const EXIT_SAME_ISSUE: u8 = 2;
@@ -166,6 +167,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Set the issue's title to --title and replace its description with
+    /// the file's content, verbatim, and print its identifier and URL. Only
+    /// the fields given are sent. Values equal to the current ones: printed,
+    /// nothing written. An empty title or description is refused (exit 2)
+    /// before anything is sent
+    #[command(group = clap::ArgGroup::new("change").required(true).multiple(true))]
+    Edit {
+        /// Issue identifier, such as ABC-123
+        issue: String,
+        /// The new title, set as given
+        #[arg(long, group = "change")]
+        title: Option<String>,
+        /// Markdown for the new description, sent as it is
+        #[arg(long, value_name = "FILE", group = "change")]
+        description_file: Option<PathBuf>,
+        /// Print identifier, URL and whether it changed as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Projects: create
     Project {
         #[command(subcommand)]
@@ -242,6 +262,21 @@ pub fn run(args: Args) -> Result<u8, Error> {
         },
         _ => None,
     };
+    // And an edit: an empty title or description is refused before the key.
+    let description = match &args.command {
+        Command::Edit {
+            title,
+            description_file,
+            ..
+        } => match edit_input(title.as_deref(), description_file.as_deref())? {
+            Ok(description) => description,
+            Err(why) => {
+                eprintln!("error: {why}; nothing sent");
+                return Ok(EXIT_BODY_REFUSED);
+            }
+        },
+        _ => None,
+    };
     if let Command::Relate { issue, other, .. } = &args.command
         && issue.eq_ignore_ascii_case(other)
     {
@@ -307,6 +342,15 @@ pub fn run(args: Args) -> Result<u8, Error> {
             json,
         } => set_project(&mut client, &issue, &project, json),
         Command::Relate { issue, other, json } => relate(&mut client, &issue, &other, json),
+        Command::Edit {
+            issue, title, json, ..
+        } => edit(
+            &mut client,
+            &issue,
+            title.as_deref(),
+            description.as_deref(),
+            json,
+        ),
         Command::Project {
             command:
                 ProjectCommand::Create {
@@ -378,6 +422,76 @@ fn comment_body(path: &Path) -> Result<Result<String, String>, Error> {
         )));
     }
     Ok(Ok(body))
+}
+
+/// The description file's content, if given, or why the edit is refused.
+/// An unreadable file is an error.
+fn edit_input(
+    title: Option<&str>,
+    description_file: Option<&Path>,
+) -> Result<Result<Option<String>, String>, Error> {
+    if title.is_some_and(|title| title.trim().is_empty()) {
+        return Ok(Err("the title is empty".to_owned()));
+    }
+    let Some(path) = description_file else {
+        return Ok(Ok(None));
+    };
+    let description = std::fs::read_to_string(path)
+        .map_err(|err| usage(format!("cannot read {}: {err}", path.display())))?;
+    if description.trim().is_empty() {
+        return Ok(Err(format!("{} is empty", path.display())));
+    }
+    Ok(Ok(Some(description)))
+}
+
+/// One `issueUpdate` with only the fields given, and none when they already
+/// hold those values.
+fn edit(
+    client: &mut Client,
+    ident: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    as_json: bool,
+) -> Result<u8, Error> {
+    let data = client.request(
+        "query($id: String!) { issue(id: $id) { id identifier url title description } }",
+        json!({"id": ident}),
+    )?;
+    let issue = &data["issue"];
+    if issue.is_null() {
+        return Err(usage(format!("no issue {ident}; nothing written")));
+    }
+    let identifier = text(issue, "/identifier")?.to_owned();
+    let url = text(issue, "/url")?.to_owned();
+    let mut input = serde_json::Map::new();
+    if let Some(title) = title {
+        input.insert("title".to_owned(), title.into());
+    }
+    if let Some(description) = description {
+        input.insert("description".to_owned(), description.into());
+    }
+    let changed = input.iter().any(|(field, value)| issue[field] != *value);
+    if changed {
+        let data = client.request(
+            "mutation($id: String!, $i: IssueUpdateInput!) { issueUpdate(id: $id, input: $i) { success } }",
+            json!({"id": text(issue, "/id")?, "i": input}),
+        )?;
+        if data.pointer("/issueUpdate/success") != Some(&Value::Bool(true)) {
+            return Err(usage(format!("Linear did not update {identifier}")));
+        }
+    } else {
+        let fields: Vec<&str> = input.keys().map(String::as_str).collect();
+        client.note(&format!(
+            "{identifier} already has the given {}; nothing written",
+            fields.join(" and ")
+        ));
+    }
+    if as_json {
+        client.print_json(&json!({"identifier": identifier, "url": url, "changed": changed}));
+    } else {
+        client.print(&format!("{identifier} {url}"));
+    }
+    Ok(0)
 }
 
 fn write_comment(client: &mut Client, ident: &str, body: &str, as_json: bool) -> Result<u8, Error> {
