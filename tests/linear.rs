@@ -656,17 +656,40 @@ fn the_unstarted_fallback_honours_the_config_override() {
 }
 
 #[test]
-fn release_without_a_state_to_restore_writes_the_comment_then_fails() {
-    let fake = Fake::start(&[KEY]);
-    fake.state()
-        .set_states(&[("In Progress", "started", 0.0), ("Done", "completed", 1.0)]);
-    fake.state().issue_state = "In Progress".into();
-    fake.state().add_comment("claim: agent-a thread-1");
-    let output = release(&fake, &["--reason", "blocked"]);
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(stderr(&output).contains("fall back"), "{}", stderr(&output));
-    assert_eq!(fake.comment_bodies()[1], "release: agent-a blocked");
-    assert_eq!(fake.first("issueUpdate"), None);
+fn release_without_a_state_to_set_writes_nothing_and_keeps_the_holder() {
+    // No state to restore, then no completed state for --done.
+    for (states, extra, says) in [
+        (
+            &[("In Progress", "started", 0.0), ("Done", "completed", 1.0)][..],
+            &["--reason", "blocked"][..],
+            "fall back",
+        ),
+        (
+            &[("Todo", "unstarted", 0.0), ("In Progress", "started", 1.0)][..],
+            &["--reason", "merged", "--done"][..],
+            "no completed state",
+        ),
+    ] {
+        let fake = Fake::start(&[KEY]);
+        fake.state().set_states(states);
+        fake.state().issue_state = "In Progress".into();
+        fake.state()
+            .add_comment("claim: agent-a thread-1\nfrom: Todo");
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(stderr(&output).contains(says), "{}", stderr(&output));
+        assert_eq!(fake.mutations(), 0);
+        assert_eq!(fake.comment_bodies().len(), 1);
+        // agent-a still holds the issue.
+        let args = ["release", ISSUE, "--agent", "agent-b", "--reason", "x"];
+        let output = linear(&fake, &args);
+        assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("held by agent-a"),
+            "{}",
+            stderr(&output)
+        );
+    }
 }
 
 #[test]

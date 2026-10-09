@@ -749,7 +749,7 @@ fn prior_state<'a>(issue: &'a Issue, claim: &str, config: &Config) -> Result<&'a
     }
     Err(usage(format!(
         "the team of {} has no state {} and no {UNSTARTED} or {BACKLOG} state to fall back to; \
-         the state is unchanged",
+         nothing written, state unchanged",
         issue.identifier,
         match recorded {
             Some(name) => format!("named {name:?} (recorded by the claim)"),
@@ -813,13 +813,16 @@ fn release(
             ));
             return Ok(EXIT_RELEASE_REFUSED);
         };
+        let state = target_state(&issue, claim, end, abandoned, config)?;
         client.note(&format!(
             "{} was released by {agent} but is still {:?}; resuming: no comment written, \
              setting the state",
             issue.identifier, issue.state
         ));
-        let (holder, claim) = (holder.to_owned(), claim.to_owned());
-        return set_release_state(client, config, &issue, &holder, &claim, end, abandoned);
+        let holder = holder.to_owned();
+        set_state(client, &issue, state)?;
+        client.print(&format!("released {} (held by {holder})", issue.identifier));
+        return Ok(0);
     };
     let body = match &why {
         Why::Force(why) => format!("release: {holder} forced by {agent}: {why}"),
@@ -836,30 +839,30 @@ fn release(
         }
         Why::Reason(reason) => format!("release: {agent} {reason}"),
     };
-    let (holder, claim) = (holder.to_owned(), claim.to_owned());
+    // Resolved before the comment: a release that cannot set its state
+    // writes nothing and leaves the holder in place.
+    let state = target_state(&issue, claim, end, abandoned, config)?;
+    let holder = holder.to_owned();
     comment(client, &issue, &body)?;
-    set_release_state(client, config, &issue, &holder, &claim, end, abandoned)
-}
-
-/// The second half of a release, after its comment: set the state `end`
-/// asks for.
-fn set_release_state(
-    client: &mut Client,
-    config: &Config,
-    issue: &Issue,
-    holder: &str,
-    claim: &str,
-    end: End,
-    abandoned: Option<&State>,
-) -> Result<u8, Error> {
-    let state = match (end, abandoned) {
-        (_, Some(state)) => state,
-        (End::Done, _) => issue.state_of_type(COMPLETED, config)?,
-        _ => prior_state(issue, claim, config)?,
-    };
-    set_state(client, issue, state)?;
+    set_state(client, &issue, state)?;
     client.print(&format!("released {} (held by {holder})", issue.identifier));
     Ok(0)
+}
+
+/// The state a release sets: the abandoned state already resolved for
+/// --abandon, the first completed one for --done, else the prior state.
+fn target_state<'a>(
+    issue: &'a Issue,
+    claim: &str,
+    end: End,
+    abandoned: Option<&'a State>,
+    config: &Config,
+) -> Result<&'a State, Error> {
+    match (end, abandoned) {
+        (_, Some(state)) => Ok(state),
+        (End::Done, _) => issue.state_of_type(COMPLETED, config),
+        _ => prior_state(issue, claim, config),
+    }
 }
 
 /// `args.labels` already holds the config's default labels, each once.

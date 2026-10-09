@@ -139,7 +139,7 @@ States are chosen by type, not by name. Among the team's states of one type the 
 | `release --abandon` | the state named by `states.abandoned`, which must be of type `canceled`; no default |
 | `release` (giving up, or `--force`) | the state in the claim's `from:` line; if there is none (a claim written by 0.2.0) or the team no longer has a state of that name, the first `unstarted` state, else the first `backlog` state |
 
-When `release` finds no state to restore, it has still written its comment; it then exits 1 and leaves the state alone.
+The state is resolved before the comment: when `release` finds no state to set (no `completed` state for `--done`, or nothing to restore), it exits 1 with nothing written, and the holder keeps the claim.
 
 ### Configuration
 
@@ -149,7 +149,7 @@ An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.js
 {"states": {"started": "Active", "unstarted": "Ready", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
 ```
 
-`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used, the release fallbacks included. An override naming a state the team does not have, with that type, is an error and nothing is changed (for `release`, after its comment). A config file that cannot be read or parsed is an error naming the file.
+`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used, the release fallbacks included. An override naming a state the team does not have, with that type, is an error and nothing is changed. A config file that cannot be read or parsed is an error naming the file.
 
 ### Endpoint
 
