@@ -15,5 +15,4 @@ Each command run bare, with its exit code:
 - `pre-commit run --all-files`
 - `cargo clippy --all-targets --locked -- -D warnings`
 - `cargo test --locked`
-
-Pair: <implementer> / <reviewer>
+- Local leak pre-review: reviewer OK, head <sha>
