@@ -169,8 +169,8 @@ enum Command {
     },
     /// Set the issue's title to --title and replace its description with
     /// the file's content, verbatim, and print its identifier and URL. Only
-    /// the fields given are sent. Values equal to the current ones: printed,
-    /// nothing written. An empty title or description is refused (exit 2)
+    /// the fields given are sent. Values equal to the current ones (the
+    /// description apart from trailing newlines): printed, nothing written. An empty title or description is refused (exit 2)
     /// before anything is sent
     #[command(group = clap::ArgGroup::new("change").required(true).multiple(true))]
     Edit {
@@ -445,7 +445,7 @@ fn edit_input(
 }
 
 /// One `issueUpdate` with only the fields given, and none when they already
-/// hold those values.
+/// hold those values (descriptions compared without trailing newlines).
 fn edit(
     client: &mut Client,
     ident: &str,
@@ -470,7 +470,12 @@ fn edit(
     if let Some(description) = description {
         input.insert("description".to_owned(), description.into());
     }
-    let changed = input.iter().any(|(field, value)| issue[field] != *value);
+    // Linear stores a description without its trailing newlines.
+    let stored = |text: &str| text.trim_end_matches(['\r', '\n']).to_owned();
+    let changed = title.is_some_and(|title| issue["title"] != title)
+        || description.is_some_and(|description| {
+            issue["description"].as_str().map(stored) != Some(stored(description))
+        });
     if changed {
         let data = client.request(
             "mutation($id: String!, $i: IssueUpdateInput!) { issueUpdate(id: $id, input: $i) { success } }",

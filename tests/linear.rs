@@ -1764,15 +1764,31 @@ fn edit_with_the_current_values_writes_nothing() {
         json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": false})
     );
     assert_eq!(fake.mutations(), 0);
+}
 
-    // Compared exactly: one more newline is a change.
-    fs::write(file, "Body\n\n").unwrap();
-    let output = edit(&fake, &["--title", "Old title", "--description-file", file]);
+#[test]
+fn edit_compares_the_description_without_trailing_newlines() {
+    // Linear stores a description without its trailing newlines.
+    let fake = Fake::start(&[KEY]);
+    fake.state().issue_description = Some("Body\n\n- item".into());
+    let file = fake.home.join("description.md");
+    let path = file.to_str().unwrap();
+    for body in ["Body\n\n- item\n", "Body\n\n- item\r\n\r\n"] {
+        fs::write(&file, body).unwrap();
+        let output = edit(&fake, &["--description-file", path, "--json"]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": false})
+        );
+    }
+    assert_eq!(fake.mutations(), 0);
+
+    // Any other difference is a change, and the file is sent verbatim.
+    fs::write(&file, "Body\n\n* item\n").unwrap();
+    let output = edit(&fake, &["--description-file", path]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(
-        edits(&fake),
-        [json!({"title": "Old title", "description": "Body\n\n"})]
-    );
+    assert_eq!(edits(&fake), [json!({"description": "Body\n\n* item\n"})]);
 }
 
 #[test]
