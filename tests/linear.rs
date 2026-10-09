@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 const KEY: &str = "synthetic-linear-key-not-a-credential";
 const NEW_KEY: &str = "synthetic-linear-key-not-a-credential-rotated";
 const ISSUE: &str = "ABC-123";
+/// A second issue on the same team, id `i-2`, for `relate`.
+const OTHER: &str = "ABC-124";
 
 /// A fresh directory for one test.
 fn scratch(name: &str) -> PathBuf {
@@ -50,6 +52,10 @@ struct State {
     projects: Vec<(String, String, Vec<String>, bool, bool)>,
     created_projects: Vec<Value>,
     viewer_id: String,
+    /// The id of the project ISSUE is in.
+    issue_project: Option<String>,
+    /// (issue id, related issue id, type)
+    relations: Vec<(String, String, String)>,
 }
 
 impl State {
@@ -96,7 +102,28 @@ impl State {
     }
 
     fn answer(&mut self, query: &str, vars: &Value) -> Value {
-        if query.contains("projectCreate") {
+        if query.contains("team(id") && query.contains("projects(first") {
+            // A team's projects in pages of one, names compared ignoring case;
+            // archived (and so trashed) ones left out, as Linear does without
+            // includeArchived.
+            let matching: Vec<_> = self
+                .projects
+                .iter()
+                .filter(|p| p.1.eq_ignore_ascii_case(vars["n"].as_str().unwrap()))
+                .filter(|p| p.2.iter().any(|t| vars["t"] == *t))
+                .filter(|p| !p.3 || query.contains("includeArchived: true"))
+                .collect();
+            let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
+            let end = (start + 1).min(matching.len());
+            let nodes: Vec<Value> = matching[start..end]
+                .iter()
+                .map(|p| json!({"id": p.0, "name": p.1, "url": project_url(&p.0)}))
+                .collect();
+            json!({"team": {"projects": {"nodes": nodes, "pageInfo": {
+                "hasNextPage": end < matching.len(),
+                "endCursor": end.to_string(),
+            }}}})
+        } else if query.contains("projectCreate") {
             let input = vars["i"].clone();
             let name = input["name"].as_str().unwrap().to_owned();
             let teams: Vec<&str> = input["teamIds"]
@@ -140,6 +167,17 @@ impl State {
                 "hasNextPage": end < matching.len(),
                 "endCursor": end.to_string(),
             }}})
+        } else if query.contains("issueUpdate") && query.contains("projectId") {
+            self.issue_project = Some(vars["p"].as_str().unwrap().to_owned());
+            json!({"issueUpdate": {"success": true}})
+        } else if query.contains("issueRelationCreate") {
+            let input = &vars["i"];
+            self.relations.push((
+                input["issueId"].as_str().unwrap().to_owned(),
+                input["relatedIssueId"].as_str().unwrap().to_owned(),
+                input["type"].as_str().unwrap().to_owned(),
+            ));
+            json!({"issueRelationCreate": {"success": true}})
         } else if query.contains("issueUpdate") {
             let state = self.states.iter().find(|s| vars["s"] == s.0).unwrap();
             self.issue_state = state.1.clone();
@@ -197,11 +235,47 @@ impl State {
                 json!([])
             };
             json!({"team": {"projects": {"nodes": nodes}}})
+        } else if query.contains("elations(first") {
+            // Pages of one, from the side of the issue asked about.
+            let inverse = query.contains("inverseRelations");
+            let field = if inverse {
+                "inverseRelations"
+            } else {
+                "relations"
+            };
+            let mine: Vec<_> = self
+                .relations
+                .iter()
+                .filter(|r| vars["id"] == *if inverse { &r.1 } else { &r.0 })
+                .collect();
+            let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
+            let end = (start + 1).min(mine.len());
+            let nodes: Vec<Value> = mine[start..end]
+                .iter()
+                .map(|(from, to, kind)| {
+                    if inverse {
+                        json!({"type": kind, "issue": {"id": from}})
+                    } else {
+                        json!({"type": kind, "relatedIssue": {"id": to}})
+                    }
+                })
+                .collect();
+            json!({"issue": {field: {"nodes": nodes, "pageInfo": {
+                "hasNextPage": end < mine.len(),
+                "endCursor": end.to_string(),
+            }}}})
+        } else if query.contains("issue(") && (vars["id"] == OTHER || vars["id"] == "i-2") {
+            json!({"issue": {"id": "i-2", "identifier": OTHER, "project": null,
+                "team": {"id": "t-1", "key": "TEAM"}}})
         } else if query.contains("issue(") {
             // One issue, looked up by identifier or by id.
             if vars["id"] != ISSUE && vars["id"] != "i-1" {
                 return json!({"issue": null});
             }
+            let project = self.issue_project.as_ref().map(|id| {
+                let name = &self.projects.iter().find(|p| &p.0 == id).unwrap().1;
+                json!({"id": id, "name": name, "url": project_url(id)})
+            });
             let states: Vec<Value> = self
                 .states
                 .iter()
@@ -210,8 +284,8 @@ impl State {
                 })
                 .collect();
             json!({"issue": {"id": "i-1", "identifier": ISSUE,
-                "state": {"name": self.issue_state},
-                "team": {"states": {"nodes": states}}}})
+                "state": {"name": self.issue_state}, "project": project,
+                "team": {"id": "t-1", "key": "TEAM", "states": {"nodes": states}}}})
         } else if query.contains("viewer") {
             json!({"viewer": {"id": self.viewer_id}})
         } else {
@@ -245,6 +319,8 @@ impl Fake {
             projects: Vec::new(),
             created_projects: Vec::new(),
             viewer_id: "u-1".into(),
+            issue_project: None,
+            relations: Vec::new(),
         };
         state.set_states(&[
             ("Backlog", "backlog", 0.0),
@@ -1250,4 +1326,212 @@ fn release_abandon_conflicts_with_done() {
     let output = release(&fake, &["--reason", "x", "--abandon", "--done"]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(fake.state().requests.is_empty());
+}
+
+fn set_project(fake: &Fake, extra: &[&str]) -> Output {
+    let mut args = vec!["set-project", ISSUE, "--project", "Project name"];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
+
+#[test]
+fn set_project_puts_an_issue_without_a_project_into_the_teams_project() {
+    let fake = Fake::start(&[KEY]);
+    // Another case, another team, archived: none of them is the project.
+    fake.state().add_project("project name", &["t-1"]);
+    fake.state().add_project("Project name", &["t-2"]);
+    fake.state().add_archived_project("Project name", &["t-1"]);
+    let id = fake.state().add_project("Project name", &["t-1"]);
+    let output = set_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        format!("{ISSUE} Project name {}", project_url(&id))
+    );
+    let state = fake.state();
+    let writes: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|r| r.query.starts_with("mutation"))
+        .collect();
+    assert_eq!(writes.len(), 1);
+    assert!(writes[0].query.contains("issueUpdate"));
+    assert_eq!(writes[0].variables, json!({"id": "i-1", "p": id}));
+}
+
+#[test]
+fn set_project_prints_an_issue_already_in_the_project_without_writing() {
+    let fake = Fake::start(&[KEY]);
+    let id = fake.state().add_project("Project name", &["t-1"]);
+    fake.state().issue_project = Some(id.clone());
+    let output = set_project(&fake, &["--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "project": "Project name",
+            "url": project_url(&id), "changed": false})
+    );
+    assert!(
+        stderr(&output).contains("already in project"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn set_project_refuses_an_issue_in_another_project() {
+    let fake = Fake::start(&[KEY]);
+    let current = fake.state().add_project("Current", &["t-1"]);
+    fake.state().add_project("Project name", &["t-1"]);
+    fake.state().issue_project = Some(current.clone());
+    let output = set_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("is in project \"Current\""),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+    assert_eq!(fake.state().issue_project, Some(current));
+}
+
+#[test]
+fn set_project_refuses_a_missing_or_ambiguous_project_or_a_missing_issue() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_archived_project("Project name", &["t-1"]);
+    fake.state().add_project("Project name", &["t-2"]);
+    let output = set_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("has 0 unarchived projects"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+
+    // The second is on the next page.
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_project("Project name", &["t-1"]);
+    fake.state().add_project("Project name", &["t-1"]);
+    let output = set_project(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("has 2 unarchived projects"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_project("Project name", &["t-1"]);
+    let output = linear(
+        &fake,
+        &["set-project", "ABC-999", "--project", "Project name"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("no issue ABC-999"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+fn relate(fake: &Fake, issue: &str, other: &str, extra: &[&str]) -> Output {
+    let mut args = vec!["relate", issue, other];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
+
+fn relation(from: &str, to: &str, kind: &str) -> (String, String, String) {
+    (from.to_owned(), to.to_owned(), kind.to_owned())
+}
+
+#[test]
+fn relate_creates_one_related_relation_when_there_is_none() {
+    let fake = Fake::start(&[KEY]);
+    // Relations with a third issue, on both sides, are not between the two.
+    fake.state().relations = vec![
+        relation("i-1", "i-9", "blocks"),
+        relation("i-9", "i-1", "related"),
+    ];
+    let output = relate(&fake, ISSUE, OTHER, &["--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"issue": ISSUE, "other": OTHER, "type": "related", "created": true})
+    );
+    assert_eq!(fake.mutations(), 1);
+    assert_eq!(fake.state().relations[2], relation("i-1", "i-2", "related"));
+}
+
+#[test]
+fn relate_writes_nothing_when_any_relation_links_the_two_either_way() {
+    for (existing, note) in [
+        (
+            relation("i-1", "i-2", "related"),
+            "a `related` relation already links ABC-123 to ABC-124",
+        ),
+        (
+            relation("i-2", "i-1", "related"),
+            "a `related` relation already links ABC-124 to ABC-123",
+        ),
+        (
+            relation("i-2", "i-1", "blocks"),
+            "a `blocks` relation already links ABC-124 to ABC-123; nothing written; no `related` relation added",
+        ),
+    ] {
+        let fake = Fake::start(&[KEY]);
+        // The match is on a later page of both sides.
+        fake.state().relations = vec![
+            relation("i-1", "i-9", "similar"),
+            relation("i-9", "i-1", "similar"),
+            existing.clone(),
+        ];
+        let output = relate(&fake, ISSUE, OTHER, &[]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(stdout(&output).trim(), format!("{ISSUE} {OTHER}"));
+        assert!(stderr(&output).contains(note), "{}", stderr(&output));
+        assert_eq!(fake.mutations(), 0, "{existing:?}");
+    }
+}
+
+#[test]
+fn relate_refuses_the_same_issue_twice() {
+    // As text, ignoring case: before any request.
+    let fake = Fake::start(&[KEY]);
+    let output = relate(&fake, ISSUE, "abc-123", &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("two different issues"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.state().requests.len(), 0);
+
+    // An id and an identifier of one issue: after the lookups.
+    let output = relate(&fake, ISSUE, "i-1", &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("are the same issue"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn relate_with_a_missing_issue_writes_nothing() {
+    for (issue, other) in [("ABC-999", OTHER), (ISSUE, "ABC-999")] {
+        let fake = Fake::start(&[KEY]);
+        let output = relate(&fake, issue, other, &[]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            stderr(&output).contains("no issue ABC-999"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(fake.mutations(), 0);
+    }
 }
