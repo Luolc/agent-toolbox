@@ -1,5 +1,4 @@
 # docs
 
-Design records go to `adr/`, operating notes to `knowledge/`.
-
+- [design.md](design.md): the one design document, the current state of the code.
 - [knowledge/release.md](knowledge/release.md): how to cut a release.
