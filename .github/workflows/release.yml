@@ -42,7 +42,7 @@ jobs:
   # needs this one, so a mismatch creates nothing anywhere.
   guard:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -66,7 +66,7 @@ jobs:
   create-release:
     if: github.event_name == 'push'
     needs: guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -92,10 +92,10 @@ jobs:
         include:
           # `run`: the runner can execute this target's binary.
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
             run: true
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -167,7 +167,7 @@ jobs:
   upload-assets:
     if: github.event_name == 'push'
     needs: [build, create-release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -202,7 +202,7 @@ jobs:
   publish:
     if: github.event_name == 'push'
     needs: guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       # `id-token: write` is the permission crates.io asks for; `contents:
       # read` is for the checkout, since job-level permissions zero out
