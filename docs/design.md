@@ -1,6 +1,6 @@
 # Design
 
-The current state of the code on `main`. It is edited in place, only in a design pass; history is the decision log at the end and git.
+The current state of the code on `main`. It is edited in place, only in a design pass; history is in git and the pull requests.
 
 ## 1. What this is, and what it is not
 
@@ -81,6 +81,7 @@ Repository:
 - Commands and flags: `atb --help`, `atb quota --help`, `atb linear --help`.
 - Credential sources, proxy, exit statuses and the Linear key: [README](../README.md), sections "`atb quota`" and "`atb linear`".
 - The claim protocol, states and config file: [README](../README.md), section "`atb linear`".
+- Contract: the `--json` output fields, the exit statuses and the `claim:` / `release:` comment formats of `atb linear` are what other tools rely on. Changing any of them is a breaking change and bumps the minor version. Details: [README](../README.md), section "`atb linear`".
 - Cutting a release: [docs/knowledge/release.md](knowledge/release.md).
 - Automation: [ci.yml](../.github/workflows/ci.yml), [release.yml](../.github/workflows/release.yml).
 
@@ -92,17 +93,3 @@ Repository:
 - Three invariants in section 3 have no test: the quota request rules, the Codex 429 exception and the release guard; the 24-hour key expiry is also untested.
 - The Codex `User-Agent` follows the upstream client's source and was not compared with a captured request (PR #1).
 - Open work is tracked in Linear, not here.
-
-## Decision log
-
-- 2026-09-30: `atb quota` for Claude, Codex and Grok; command tree is tool first, harness second ([#1](https://github.com/Luolc/agent-toolbox/pull/1)).
-- 2026-09-30: Release workflow with a separate tag guard, four targets, Trusted Publishing; the crate becomes publishable ([#2](https://github.com/Luolc/agent-toolbox/pull/2)).
-- 2026-10-03: `AGENTS.md` keeps only what is specific to this repository ([#3](https://github.com/Luolc/agent-toolbox/pull/3)).
-- 2026-10-06: Proxy variables are honoured by `atb quota` and documented ([#4](https://github.com/Luolc/agent-toolbox/pull/4)).
-- 2026-10-08: `atb linear` added: claim, release, create, read-only query; key from a command with a 24-hour cache; Scope allows the one 401 retry ([#5](https://github.com/Luolc/agent-toolbox/pull/5)).
-- 2026-10-08: Linear states chosen by type, `release` restores the prior state, labels only on request ([#6](https://github.com/Luolc/agent-toolbox/pull/6)).
-- 2026-10-08: `atb linear project create`, idempotent; archived is a refusal, trashed is absent ([#7](https://github.com/Luolc/agent-toolbox/pull/7)).
-- 2026-10-08: Run `cargo clean -p agent-toolbox` after a publish dry run before testing ([#8](https://github.com/Luolc/agent-toolbox/pull/8)).
-- 2026-10-09: `docs/design.md`, the pull request template and the design length check ([#9](https://github.com/Luolc/agent-toolbox/pull/9)).
-- 2026-10-09: The template drops the `Pair` line and gains a local leak pre-review line ([#10](https://github.com/Luolc/agent-toolbox/pull/10)).
-- 2026-10-09: `atb linear comment`, `create --parent`, `release --abandon`; the abandoned state is configured, never defaulted, and `comment` refuses `claim:` and `release:` bodies ([#11](https://github.com/Luolc/agent-toolbox/pull/11)).
