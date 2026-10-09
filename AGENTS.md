@@ -20,7 +20,7 @@ Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth
 
 ## Layout and docs
 
-- `docs/design.md` is the one design document: current state only, edited in place, five sections and a decision log, at most 200 lines (checked in CI). It is edited only in a design pass the orchestra triggers; every other PR fills in "Design impact" in the template.
+- `docs/design.md` is the one design document: current state only, edited in place, five sections, at most 200 lines (checked in CI). It is edited only in a design pass the orchestra triggers; every other PR fills in "Design impact" in the template.
 - Every PR follows `.github/pull_request_template.md`.
 - Manuals live in `docs/knowledge/` (the release manual). The CLI reference is `atb --help`.
 - There are no ADRs, research notes or to-do list in the repository. Open work is tracked outside the repository.
