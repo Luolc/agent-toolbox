@@ -1,10 +1,10 @@
 # Agent rules (this repository)
 
-Language: case B, everything in this repository is English. Global rules live in `~/.agents/AGENTS.md` (source: the `machine-setup` repository, `dotfiles/dot_agents/readonly_AGENTS.md`); this file only adds what is specific to this repository. `CLAUDE.md` is a symlink to this file; always edit this file.
+Everything in this repository is English. `CLAUDE.md` is a symlink to this file; always edit this file.
 
-This is a public repository: no personal information, no hostnames of private machines, no credentials or references to private vaults. Machine-specific integration belongs to the private repositories that consume this tool.
+This is a public repository. Machine-specific integration belongs to the private repositories that consume this tool.
 
-Short name `atb`; the resident orchestra is `atb-orchestra`.
+Short name `atb`.
 
 ## Scope
 
@@ -23,11 +23,10 @@ Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth
 - `docs/design.md` is the one design document: current state only, edited in place, five sections and a decision log, at most 200 lines (checked in CI). It is edited only in a design pass the orchestra triggers; every other PR fills in "Design impact" in the template.
 - Every PR follows `.github/pull_request_template.md`.
 - Manuals live in `docs/knowledge/` (the release manual). The CLI reference is `atb --help`.
-- There are no ADRs, research notes or to-do list in the repository. Open work lives in Linear and is claimed and released with `atb linear` (see `.agents/skills/linear/SKILL.md`).
+- There are no ADRs, research notes or to-do list in the repository. Open work is tracked outside the repository.
 
-## Quality checks and merging
+## Quality checks
 
 - Local: `pre-commit run --all-files` (gitleaks on the staged diff, `cargo fmt --check`); run `pre-commit install` once after cloning. Before pushing also run `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`.
 - After `cargo publish --dry-run`, `cargo test` can run a stale binary and miss source edits. Run `cargo clean -p agent-toolbox` before mutation runs and before any test run that follows a publish dry run.
 - CI: `.github/workflows/ci.yml`, job `check`: full-history gitleaks scan, `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, `cargo doc` with warnings denied, the design document length check. `check` is the required status check on `main`.
-- Reviewers also load `.agents/skills/atb-pr-review`.
