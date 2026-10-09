@@ -1,6 +1,6 @@
 //! `atb linear <command>`: claim and release Linear issues by comment, write
-//! comments, create issues and projects for agents, and run read-only GraphQL
-//! queries.
+//! comments, create issues and projects for agents, put an issue into a
+//! project, relate two issues, and run read-only GraphQL queries.
 
 mod config;
 mod document;
@@ -24,6 +24,8 @@ pub const EXIT_CLAIM_LOST: u8 = 3;
 pub const EXIT_RELEASE_REFUSED: u8 = 4;
 /// A comment body refused before the key is read, as for a usage error.
 const EXIT_BODY_REFUSED: u8 = 2;
+/// `relate` given one issue twice, as for a usage error.
+const EXIT_SAME_ISSUE: u8 = 2;
 
 const AFTER_HELP: &str = "\
 Key sources, highest first:
@@ -46,7 +48,8 @@ release --abandon sets the state named by \"states\": {\"abandoned\": ...},
 which must be of type `canceled`; without that entry it is an error.
 
 Exit status: 0 on success, 1 on error, 2 on a usage error (including a
-comment body that is empty or starts with `claim:` or `release:`) or when
+comment body that is empty or starts with `claim:` or `release:`, and relate
+given the same issue twice) or when
 Linear answers 429 (the retry-after value is printed; nothing is retried), 3
 when a claim lost to an earlier claim, 4 when a release was refused (no
 holder, or the holder is another agent).";
@@ -131,6 +134,35 @@ enum Command {
     /// default_labels (a missing label is created on the team), optionally as
     /// a sub-issue of --parent, and print its identifier and URL
     Create(CreateArgs),
+    /// Put an issue that is in no project into the project of its team
+    /// named exactly --project, and print the identifier, project name and
+    /// URL. Already in that project: printed, nothing written. In another
+    /// project, or no single unarchived project of the team with the name:
+    /// exit 1, nothing written
+    SetProject {
+        /// Issue identifier, such as ABC-123
+        issue: String,
+        /// Project name, matched exactly (case-sensitive) against the
+        /// unarchived projects of the issue's team
+        #[arg(long, value_name = "NAME")]
+        project: String,
+        /// Print identifier, project, URL and whether it changed as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a `related` relation between two issues and print both
+    /// identifiers. A relation of any type, in either direction, already
+    /// between them: printed, nothing written. The same issue twice: exit 2
+    Relate {
+        /// Issue identifier, such as ABC-123
+        issue: String,
+        /// The other issue, such as ABC-124
+        other: String,
+        /// Print both identifiers, the relation type and whether it was
+        /// created as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Projects: create
     Project {
         #[command(subcommand)]
@@ -207,6 +239,12 @@ pub fn run(args: Args) -> Result<u8, Error> {
         },
         _ => None,
     };
+    if let Command::Relate { issue, other, .. } = &args.command
+        && issue.eq_ignore_ascii_case(other)
+    {
+        eprintln!("error: relate needs two different issues, got {issue} twice; nothing sent");
+        return Ok(EXIT_SAME_ISSUE);
+    }
     let config = match &args.command {
         Command::Query { .. } => Config::default(),
         _ => Config::load(&config_dir(&ctx)?.join("config.json"))?,
@@ -260,6 +298,12 @@ pub fn run(args: Args) -> Result<u8, Error> {
             args.labels.retain(|label| seen.insert(label.clone()));
             create(&mut client, &args)
         }
+        Command::SetProject {
+            issue,
+            project,
+            json,
+        } => set_project(&mut client, &issue, &project, json),
+        Command::Relate { issue, other, json } => relate(&mut client, &issue, &other, json),
         Command::Project {
             command:
                 ProjectCommand::Create {
@@ -950,6 +994,203 @@ fn create_project(
         }));
     } else {
         client.print(&format!("{} {}", project.name, project.url));
+    }
+    Ok(0)
+}
+
+/// The issue's project is set only when it has none, so this never moves an
+/// issue out of a project. Archived projects (trashed ones are archived too)
+/// do not count: Linear leaves them out unless `includeArchived` is given.
+fn set_project(client: &mut Client, ident: &str, name: &str, as_json: bool) -> Result<u8, Error> {
+    let data = client.request(
+        "query($id: String!) { issue(id: $id) { id identifier team { id key } project { id name url } } }",
+        json!({"id": ident}),
+    )?;
+    let issue = &data["issue"];
+    if issue.is_null() {
+        return Err(usage(format!("no issue {ident}; nothing written")));
+    }
+    let identifier = text(issue, "/identifier")?.to_owned();
+    let team = text(issue, "/team/id")?.to_owned();
+    let team_key = text(issue, "/team/key")?.to_owned();
+    let mut matches = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let data = client.request(
+            "query($t: String!, $n: String!, $after: String) { team(id: $t) { projects(first: 50, after: $after, filter: {name: {eq: $n}}) { nodes { id name url } pageInfo { hasNextPage endCursor } } } }",
+            json!({"t": team, "n": name, "after": after}),
+        )?;
+        let page = &data["team"]["projects"];
+        for node in page["nodes"].as_array().into_iter().flatten() {
+            // Compared here too, so the match is case-sensitive whatever
+            // collation the server uses.
+            if text(node, "/name")? == name {
+                matches.push((
+                    text(node, "/id")?.to_owned(),
+                    text(node, "/url")?.to_owned(),
+                ));
+            }
+        }
+        if page.pointer("/pageInfo/hasNextPage") != Some(&Value::Bool(true)) {
+            break;
+        }
+        after = Value::from(text(page, "/pageInfo/endCursor")?);
+    }
+    let [(project, url)] = matches.as_slice() else {
+        return Err(usage(format!(
+            "team {team_key} has {} unarchived projects named {name:?}; exactly one is needed, \
+             nothing written",
+            matches.len()
+        )));
+    };
+    let changed = match issue["project"].as_object() {
+        None => {
+            let data = client.request(
+                "mutation($id: String!, $p: String!) { issueUpdate(id: $id, input: {projectId: $p}) { success } }",
+                json!({"id": text(issue, "/id")?, "p": project}),
+            )?;
+            if data.pointer("/issueUpdate/success") != Some(&Value::Bool(true)) {
+                return Err(usage(format!(
+                    "Linear did not put {identifier} into project {name:?}"
+                )));
+            }
+            true
+        }
+        Some(_) if text(issue, "/project/id")? == project => {
+            client.note(&format!(
+                "{identifier} is already in project {name:?}; nothing written"
+            ));
+            false
+        }
+        Some(_) => {
+            return Err(usage(format!(
+                "{identifier} is in project {:?} ({}); nothing written: \
+                 set-project does not move an issue between projects",
+                text(issue, "/project/name")?,
+                text(issue, "/project/url")?,
+            )));
+        }
+    };
+    if as_json {
+        client.print_json(&json!({
+            "identifier": identifier,
+            "project": name,
+            "url": url,
+            "changed": changed,
+        }));
+    } else {
+        client.print(&format!("{identifier} {name} {url}"));
+    }
+    Ok(0)
+}
+
+/// The id and identifier of an issue, or an error saying nothing was written.
+fn issue_id(client: &mut Client, ident: &str) -> Result<(String, String), Error> {
+    let data = client.request(
+        "query($id: String!) { issue(id: $id) { id identifier } }",
+        json!({"id": ident}),
+    )?;
+    let issue = &data["issue"];
+    if issue.is_null() {
+        return Err(usage(format!("no issue {ident}; nothing written")));
+    }
+    Ok((
+        text(issue, "/id")?.to_owned(),
+        text(issue, "/identifier")?.to_owned(),
+    ))
+}
+
+/// Every relation on one side of the issue: `relations` (the issue is
+/// `issue`) or `inverseRelations` (the issue is `relatedIssue`), as the type
+/// and the id of the issue on the other side, across pages.
+fn relations(client: &mut Client, id: &str, field: &str) -> Result<Vec<(String, String)>, Error> {
+    let far = if field == "relations" {
+        "relatedIssue"
+    } else {
+        "issue"
+    };
+    let mut all = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let data = client.request(
+            &format!(
+                "query($id: String!, $after: String) {{ issue(id: $id) {{ {field}(first: 100, after: $after) {{ nodes {{ type {far} {{ id }} }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
+            ),
+            json!({"id": id, "after": after}),
+        )?;
+        let page = &data["issue"][field];
+        for node in page["nodes"].as_array().into_iter().flatten() {
+            all.push((
+                text(node, "/type")?.to_owned(),
+                text(node, &format!("/{far}/id"))?.to_owned(),
+            ));
+        }
+        if page.pointer("/pageInfo/hasNextPage") != Some(&Value::Bool(true)) {
+            break;
+        }
+        after = Value::from(text(page, "/pageInfo/endCursor")?);
+    }
+    Ok(all)
+}
+
+/// Idempotent: any relation already between the two, whatever its type or
+/// direction, means nothing is written. Both directions are read from the
+/// first issue's side, which sees every relation it takes part in.
+fn relate(client: &mut Client, ident: &str, other: &str, as_json: bool) -> Result<u8, Error> {
+    let (id, identifier) = issue_id(client, ident)?;
+    let (other_id, other_identifier) = issue_id(client, other)?;
+    if id == other_id {
+        client.note(&format!(
+            "error: {ident} and {other} are the same issue, {identifier}; nothing written"
+        ));
+        return Ok(EXIT_SAME_ISSUE);
+    }
+    let outgoing = relations(client, &id, "relations")?;
+    let incoming = relations(client, &id, "inverseRelations")?;
+    let existing = outgoing
+        .iter()
+        .find(|(_, far)| *far == other_id)
+        .map(|(kind, _)| (kind, &identifier, &other_identifier))
+        .or_else(|| {
+            incoming
+                .iter()
+                .find(|(_, far)| *far == other_id)
+                .map(|(kind, _)| (kind, &other_identifier, &identifier))
+        });
+    let (kind, created) = match existing {
+        Some((kind, from, to)) => {
+            let added = if kind == "related" {
+                String::new()
+            } else {
+                "; no `related` relation added".to_owned()
+            };
+            client.note(&format!(
+                "a `{kind}` relation already links {from} to {to}; nothing written{added}"
+            ));
+            (kind.clone(), false)
+        }
+        None => {
+            let data = client.request(
+                "mutation($i: IssueRelationCreateInput!) { issueRelationCreate(input: $i) { success } }",
+                json!({"i": {"issueId": id, "relatedIssueId": other_id, "type": "related"}}),
+            )?;
+            if data.pointer("/issueRelationCreate/success") != Some(&Value::Bool(true)) {
+                return Err(usage(format!(
+                    "Linear did not relate {identifier} to {other_identifier}"
+                )));
+            }
+            ("related".to_owned(), true)
+        }
+    };
+    if as_json {
+        client.print_json(&json!({
+            "issue": identifier,
+            "other": other_identifier,
+            "type": kind,
+            "created": created,
+        }));
+    } else {
+        client.print(&format!("{identifier} {other_identifier}"));
     }
     Ok(0)
 }

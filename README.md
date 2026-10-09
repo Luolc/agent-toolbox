@@ -57,10 +57,12 @@ atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [-
 atb linear comment <ISSUE> --body-file <file> [--json]
 atb linear create --team <KEY> [--project <name>] [--parent <ISSUE>] --title <title> --description-file <file> [--label <name>]... [--json]
 atb linear project create --team <KEY> --name <name> [--description-file <file>] [--json]
+atb linear set-project <ISSUE> --project <name> [--json]
+atb linear relate <ISSUE> <OTHER> [--json]
 atb linear query <GRAPHQL | FILE>
 ```
 
-Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; writes other comments; creates issues, optionally as sub-issues of a parent; creates a project unless one with the name exists; runs read-only GraphQL queries. Examples below use `ABC-123` for an issue and `TEAM` for a team key.
+Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; writes other comments; creates issues, optionally as sub-issues of a parent; creates a project unless one with the name exists; puts an issue into a project; relates two issues; runs read-only GraphQL queries. Examples below use `ABC-123` for an issue and `TEAM` for a team key.
 
 ```sh
 atb linear claim ABC-123 --agent docs-impl --source thread-42 --scope 'my-repo: src/, docs/'
@@ -72,6 +74,8 @@ atb linear comment ABC-123 --body-file notes.md
 atb linear create --team TEAM --project 'Project name' --title 'Short title' --description-file body.md --label bug
 atb linear create --team TEAM --parent ABC-123 --title 'Second attempt' --description-file body.md
 atb linear project create --team TEAM --name 'Project name' --description-file overview.md
+atb linear set-project ABC-123 --project 'Project name'
+atb linear relate ABC-123 ABC-124
 atb linear query '{ viewer { id } }'
 ```
 
@@ -85,11 +89,13 @@ The current holder is the agent named in the latest `claim:` comment that has no
 
 `release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` (with `--force` the forced comment is unchanged) and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. Without either, the state the claim recorded in `from:` is restored; if the issue was already in a `started` state when claimed (for example after a lost claim), `from:` records that state and it is the one restored. `--todo` is deprecated: it is accepted and does nothing, since restoring is the default.
 
-### Comment, create, project, query
+### Comment, create, project, set-project, relate, query
 
 - `comment` writes the file's content as one comment, verbatim, and prints its URL (`{"id", "url"}` with `--json`). It refuses a body that is empty or whitespace only, or whose first line, after leading whitespace, starts with `claim:` or `release:` (exit 2) before the key is read, so nothing is sent.
 - `create` resolves the team by key and the project by name within that team (missing or ambiguous: error) and prints `<identifier> <url>`, or JSON with `--json`. It adds the labels given with `--label` (repeatable) and those in `default_labels` of the config file, each once; with neither, the issue is created without labels. A label that is neither a workspace label nor the team's own is created on the team. `--parent <ISSUE>` creates a sub-issue of that issue, looked up before anything is written (missing: exit 1, nothing created); the parent may be on another team, and the new issue goes on `--team` either way.
 - `project create` is idempotent by name. It looks up every project named exactly `<name>` (case-sensitive), archived ones included and projects in the trash left out. None: it creates the project on the team, with the file's Markdown as the project's content (Linear's short `description` stays empty), and prints `<name> <url>`. Exactly one, on the team and not archived: it prints that project, says on stderr that it already exists and changes nothing; it never adds the team to an existing project. An archived one, one not on the team, or more than one: exit 1, nothing written. `--json` prints `{"name", "url", "id", "created"}`.
+- `set-project` puts an issue that is in no project into a project of the issue's team, named exactly `<name>` (case-sensitive), and prints `<identifier> <project name> <project url>`. Archived projects, those in the trash included, do not count. The issue and the project are looked up before anything is written: a missing issue, or a team with no such project or more than one, is exit 1 and nothing is written. Already in that project: it prints the same, says so on stderr and changes nothing. In another project: exit 1, nothing written, and the message names the current project; it never moves an issue between projects. `--json` prints `{"identifier", "project", "url", "changed"}`.
+- `relate` adds one `related` relation between two issues and prints both identifiers. Both are looked up first (missing: exit 1, nothing written). If a relation of any type already links them, in either direction, it prints the same, names that relation's type and direction on stderr and writes nothing; a `blocks`, `duplicate` or `similar` relation is left as it is and no `related` one is added. The same issue twice is exit 2: two identifiers equal ignoring case are refused before anything is sent, and two arguments that resolve to one issue (an id and its identifier) after the lookups, with nothing written. `--json` prints `{"issue", "other", "type", "created"}`, where `type` is the existing relation's type when nothing was created.
 - `query` takes a file path if such a file exists, otherwise the query text, and prints the response's `data` as JSON. It is read-only: a document containing a `mutation` or `subscription` operation is refused before anything is sent.
 
 Example queries (the filters follow Linear's schema and have not been run against a real workspace):
@@ -106,8 +112,8 @@ atb linear query '{ issue(id: "ABC-123") { comments { nodes { body createdAt } }
 | Exit status | Meaning |
 |---|---|
 | 0 | Success (`claim`: the issue is yours) |
-| 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, a project with the name is archived, off the team or exists more than once, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
-| 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`), or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
+| 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, a project with the name is archived, off the team or exists more than once, `set-project` on an issue in another project or with no single project of that name on the team, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
+| 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`, and `relate` given the same issue twice), or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
 | 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written |
 | 4 | `release` refused: the issue has no holder, or the holder is another agent and `--force` was not given |
 
