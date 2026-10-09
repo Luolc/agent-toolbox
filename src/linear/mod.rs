@@ -52,7 +52,10 @@ comment body that is empty or starts with `claim:` or `release:`, and relate
 given the same issue twice) or when
 Linear answers 429 (the retry-after value is printed; nothing is retried), 3
 when a claim lost to an earlier claim, 4 when a release was refused (no
-holder, or the holder is another agent).";
+holder, or the holder is another agent). A release run again after it wrote
+its comment but failed to set the state writes no second comment and only
+sets the state, if the issue has no holder, this agent's release is the
+latest claim or release comment and the state is still `started`.";
 
 #[derive(clap::Args)]
 #[command(after_help = AFTER_HELP)]
@@ -489,6 +492,8 @@ struct Issue {
     identifier: String,
     /// The name of the issue's current state.
     state: String,
+    /// The type of the issue's current state.
+    state_kind: String,
     /// The team's workflow states.
     states: Vec<State>,
 }
@@ -507,7 +512,7 @@ impl Issue {
 
 fn issue_info(client: &mut Client, ident: &str) -> Result<Issue, Error> {
     let data = client.request(
-        "query($id: String!) { issue(id: $id) { id identifier state { name } team { states { nodes { id name type position } } } } }",
+        "query($id: String!) { issue(id: $id) { id identifier state { name type } team { states { nodes { id name type position } } } } }",
         json!({"id": ident}),
     )?;
     let issue = &data["issue"];
@@ -532,6 +537,7 @@ fn issue_info(client: &mut Client, ident: &str) -> Result<Issue, Error> {
         id: text(issue, "/id")?.to_owned(),
         identifier: text(issue, "/identifier")?.to_owned(),
         state: text(issue, "/state/name")?.to_owned(),
+        state_kind: text(issue, "/state/type")?.to_owned(),
         states,
     })
 }
@@ -636,6 +642,41 @@ fn holder(comments: &[Comment]) -> Option<(&str, &str)> {
         (kind == Kind::Claim && !released_after(&comments[i + 1..], who))
             .then_some((who, c.body.as_str()))
     })
+}
+
+/// The agent after `forced by` in `release: <holder> forced by <agent>: ...`.
+fn forced_by(body: &str) -> Option<&str> {
+    let mut words = body.lines().next()?.split_whitespace().skip(2);
+    if (words.next()?, words.next()?) != ("forced", "by") {
+        return None;
+    }
+    words.next()?.strip_suffix(':')
+}
+
+/// The holder and claim of an interrupted release that `agent` can finish:
+/// the latest claim or release comment is a release this run would have
+/// written (`release: <agent> ...` for --reason, `release: <holder> forced by
+/// <agent>: ...` for --force), and the claim is the one it undid. Only asked
+/// when the issue has no holder.
+fn resumable<'a>(comments: &'a [Comment], agent: &str, why: &Why) -> Option<(&'a str, &'a str)> {
+    let (i, (kind, who)) = comments
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, c)| Some((i, head(&c.body)?)))?;
+    let body = &comments[i].body;
+    let mine = match why {
+        Why::Reason(_) => who == agent && forced_by(body).is_none(),
+        Why::Force(_) => forced_by(body) == Some(agent),
+    };
+    if kind != Kind::Release || !mine {
+        return None;
+    }
+    comments[..i]
+        .iter()
+        .rev()
+        .find(|c| head(&c.body) == Some((Kind::Claim, who)))
+        .map(|c| (who, c.body.as_str()))
 }
 
 /// The state recorded by `from: <name>`, which claim writes as the last line.
@@ -762,11 +803,23 @@ fn release(
     };
     let all = comments(client, &issue)?;
     let Some((holder, claim)) = holder(&all) else {
+        // A release whose comment was written but whose state was not set
+        // left no holder; finishing it must not write a second comment.
+        let resume = resumable(&all, agent, &why).filter(|_| issue.state_kind == STARTED);
+        let Some((holder, claim)) = resume else {
+            client.note(&format!(
+                "{} has no holder; nothing written, state unchanged",
+                issue.identifier
+            ));
+            return Ok(EXIT_RELEASE_REFUSED);
+        };
         client.note(&format!(
-            "{} has no holder; nothing written, state unchanged",
-            issue.identifier
+            "{} was released by {agent} but is still {:?}; resuming: no comment written, \
+             setting the state",
+            issue.identifier, issue.state
         ));
-        return Ok(EXIT_RELEASE_REFUSED);
+        let (holder, claim) = (holder.to_owned(), claim.to_owned());
+        return set_release_state(client, config, &issue, &holder, &claim, end, abandoned);
     };
     let body = match &why {
         Why::Force(why) => format!("release: {holder} forced by {agent}: {why}"),
@@ -785,12 +838,26 @@ fn release(
     };
     let (holder, claim) = (holder.to_owned(), claim.to_owned());
     comment(client, &issue, &body)?;
+    set_release_state(client, config, &issue, &holder, &claim, end, abandoned)
+}
+
+/// The second half of a release, after its comment: set the state `end`
+/// asks for.
+fn set_release_state(
+    client: &mut Client,
+    config: &Config,
+    issue: &Issue,
+    holder: &str,
+    claim: &str,
+    end: End,
+    abandoned: Option<&State>,
+) -> Result<u8, Error> {
     let state = match (end, abandoned) {
         (_, Some(state)) => state,
         (End::Done, _) => issue.state_of_type(COMPLETED, config)?,
-        _ => prior_state(&issue, &claim, config)?,
+        _ => prior_state(issue, claim, config)?,
     };
-    set_state(client, &issue, state)?;
+    set_state(client, issue, state)?;
     client.print(&format!("released {} (held by {holder})", issue.identifier));
     Ok(0)
 }
