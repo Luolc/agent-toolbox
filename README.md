@@ -53,23 +53,24 @@ Every request honours the standard proxy variables. The first valid one of `ALL_
 
 ```sh
 atb linear claim <ISSUE> --agent <name> --source <source> --scope '<repo>: <paths>'
-atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [--done | --todo]
-atb linear create --team <KEY> [--project <name>] --title <title> --description-file <file> [--label <name>]... [--json]
+atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [--done | --abandon | --todo]
+atb linear comment <ISSUE> --body-file <file> [--json]
+atb linear create --team <KEY> [--project <name>] [--parent <ISSUE>] --title <title> --description-file <file> [--label <name>]... [--json]
 atb linear project create --team <KEY> --name <name> [--description-file <file>] [--json]
 atb linear query <GRAPHQL | FILE>
 ```
 
-Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; creates issues; creates a project unless one with the name exists (a same-named project that is archived, on another team, or one of several is an error and nothing is written; one in the trash does not count); runs read-only GraphQL queries (a document with a mutation or subscription is refused before it is sent). The protocol, the exit statuses (3: claim lost, 4: release refused) and example queries are in [`.agents/skills/linear/SKILL.md`](.agents/skills/linear/SKILL.md).
+Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; writes other comments (a body starting with `claim:` or `release:` is refused); creates issues, optionally as sub-issues of a parent; creates a project unless one with the name exists (a same-named project that is archived, on another team, or one of several is an error and nothing is written; one in the trash does not count); runs read-only GraphQL queries (a document with a mutation or subscription is refused before it is sent). The protocol, the exit statuses (3: claim lost, 4: release refused) and example queries are in [`.agents/skills/linear/SKILL.md`](.agents/skills/linear/SKILL.md).
 
 The API key comes from the environment, never from a flag:
 
 1. `LINEAR_API_KEY`: the key itself.
 2. `LINEAR_API_KEY_CMD`: a command that prints the key, such as a secret manager's read command. It runs through `sh -c` and its stderr is discarded. The output is cached for 24 hours in `$XDG_CONFIG_HOME/linear/api-key` (default `~/.config/linear/api-key`, under `$ATB_HOME` if set), mode 0600 in a 0700 directory; an existing directory is tightened to 0700. On a 401 the command runs once more and the request is retried once.
 
-States are chosen by type, not by name: `claim` sets the first `started` state and records the prior one in its comment, `release --done` sets the first `completed` state, and `release` without it restores the recorded state (falling back to the first `unstarted`, then the first `backlog` state). An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.json` (default `~/.config/linear/config.json`, under `$ATB_HOME` if set), names the state to use for a type and labels that `create` always adds:
+States are chosen by type, not by name: `claim` sets the first `started` state and records the prior one in its comment, `release --done` sets the first `completed` state, `release --abandon` sets the `canceled` state the config names under `abandoned` (there is no default), and `release` without either restores the recorded state (falling back to the first `unstarted`, then the first `backlog` state). An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.json` (default `~/.config/linear/config.json`, under `$ATB_HOME` if set), names the state to use for a type and labels that `create` always adds:
 
 ```json
-{"states": {"started": "Active"}, "default_labels": ["bug"]}
+{"states": {"started": "Active", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
 ```
 
 Both keys are optional and the state names are examples; the skill has the details.

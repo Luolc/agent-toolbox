@@ -1,18 +1,20 @@
 //! The optional `<config home>/linear/config.json`:
 //! `{"states": {"<type>": "<state name>", ...}, "default_labels": ["<label>", ...]}`,
-//! both keys optional.
+//! both keys optional. Besides the state types, `states` may hold `abandoned`:
+//! the `canceled` state that `release --abandon` sets.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::Value;
 
-use super::states::TYPES;
+use super::states::{ABANDONED, TYPES};
 use crate::common::{Error, usage};
 
 #[derive(Default)]
 pub struct Config {
-    /// For each state type, the name of the state to use instead of the first.
+    /// For each state type, the name of the state to use instead of the first;
+    /// under `abandoned`, the state `release --abandon` sets.
     pub states: BTreeMap<String, String>,
     /// Labels `create` adds besides those given with `--label`.
     pub default_labels: Vec<String>,
@@ -53,9 +55,9 @@ impl Config {
             match (key.as_str(), value) {
                 ("states", Value::Object(states)) => {
                     for (kind, name) in states {
-                        if !TYPES.contains(&kind.as_str()) {
+                        if kind != ABANDONED && !TYPES.contains(&kind.as_str()) {
                             return Err(bad(&format!(
-                                "a key under \"states\" is not a state type ({})",
+                                "a key under \"states\" is neither a state type ({}) nor {ABANDONED}",
                                 TYPES.join(", ")
                             )));
                         }

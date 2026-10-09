@@ -146,7 +146,8 @@ impl State {
             json!({"issueUpdate": {"success": true}})
         } else if query.contains("commentCreate") {
             let id = self.add_comment(vars["b"].as_str().unwrap());
-            json!({"commentCreate": {"success": true, "comment": {"id": id}}})
+            let url = format!("https://linear.example/comment/{id}");
+            json!({"commentCreate": {"success": true, "comment": {"id": id, "url": url}}})
         } else if query.contains("comments(") {
             // Pages of two, so every read-back with more than two comments
             // walks the pagination.
@@ -197,6 +198,10 @@ impl State {
             };
             json!({"team": {"projects": {"nodes": nodes}}})
         } else if query.contains("issue(") {
+            // One issue, looked up by identifier or by id.
+            if vars["id"] != ISSUE && vars["id"] != "i-1" {
+                return json!({"issue": null});
+            }
             let states: Vec<Value> = self
                 .states
                 .iter()
@@ -1064,4 +1069,185 @@ fn project_create_ignores_a_trashed_project_with_the_name() {
             "id": "p-11", "created": true})
     );
     assert_eq!(fake.state().created_projects.len(), 1);
+}
+
+fn comment(fake: &Fake, issue: &str, body: &str, extra: &[&str]) -> Output {
+    let file = fake.home.join("comment.md");
+    fs::write(&file, body).unwrap();
+    let mut args = vec!["comment", issue, "--body-file", file.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
+
+#[test]
+fn comment_writes_the_file_verbatim_and_prints_its_url() {
+    let fake = Fake::start(&[KEY]);
+    let body = "  Review notes\n\nclaim: on a later line is text\n\n";
+    let output = comment(&fake, ISSUE, body, &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "https://linear.example/comment/c000\n");
+    let output = comment(&fake, ISSUE, "Second.", &["--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"id": "c001", "url": "https://linear.example/comment/c001"})
+    );
+    assert_eq!(fake.comment_bodies(), [body, "Second."]);
+    assert_eq!(fake.mutations(), 2);
+}
+
+#[test]
+fn comment_refuses_a_claim_or_release_body_or_an_empty_file_before_any_request() {
+    let fake = Fake::start(&[KEY]);
+    for body in [
+        "claim: agent-b thread-9",
+        "\n  release: agent-b merged\nmore",
+        "",
+        " \n\t\n",
+    ] {
+        let output = comment(&fake, ISSUE, body, &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{body:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("nothing written"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let missing = fake.home.join("missing.md");
+    let output = linear(
+        &fake,
+        &["comment", ISSUE, "--body-file", missing.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(fake.state().requests.is_empty());
+}
+
+#[test]
+fn comment_on_a_missing_issue_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    let output = comment(&fake, "ABC-404", "Hello.", &[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no issue ABC-404"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+#[test]
+fn create_with_a_parent_sends_the_parents_id() {
+    let fake = Fake::start(&[KEY]);
+    let output = create(&fake, &["--parent", ISSUE]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().created[0]["parentId"], "i-1");
+}
+
+#[test]
+fn create_with_a_missing_parent_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    let output = create(&fake, &["--parent", "ABC-404", "--label", "new"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no parent issue ABC-404"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+}
+
+/// Two canceled states, the configured one second, so that picking the first
+/// canceled state would show.
+fn abandon_fake(config: Option<&str>) -> Fake {
+    let fake = Fake::start(&[KEY]);
+    fake.state().set_states(&[
+        ("Todo", "unstarted", 0.0),
+        ("In Progress", "started", 1.0),
+        ("Done", "completed", 2.0),
+        ("Canceled", "canceled", 3.0),
+        ("Abandoned", "canceled", 4.0),
+    ]);
+    fake.state().issue_state = "In Progress".into();
+    if let Some(config) = config {
+        fake.write_config(config);
+    }
+    fake
+}
+
+const ABANDONED_CONFIG: &str = r#"{"states": {"abandoned": "Abandoned"}}"#;
+
+#[test]
+fn release_abandon_by_the_holder_comments_then_sets_the_configured_canceled_state() {
+    let fake = abandon_fake(Some(ABANDONED_CONFIG));
+    fake.state()
+        .add_comment("claim: agent-a thread-1\nscope: repo: src/\nfrom: Todo");
+    let output = release(&fake, &["--reason", "superseded", "--abandon"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        fake.comment_bodies()[1],
+        "release: agent-a abandoned: superseded"
+    );
+    assert_eq!(fake.state().issue_state, "Abandoned");
+    assert!(fake.first("commentCreate").unwrap() < fake.first("issueUpdate").unwrap());
+}
+
+#[test]
+fn forced_release_abandon_names_the_holder_and_sets_the_configured_state() {
+    let fake = abandon_fake(Some(ABANDONED_CONFIG));
+    fake.state()
+        .add_comment("claim: agent-b thread-2\nfrom: Todo");
+    let output = release(&fake, &["--force", "holder gone", "--abandon"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        fake.comment_bodies()[1],
+        "release: agent-b forced by agent-a: holder gone"
+    );
+    assert_eq!(fake.state().issue_state, "Abandoned");
+}
+
+#[test]
+fn release_abandon_without_a_canceled_state_configured_writes_nothing() {
+    for (config, message) in [
+        (None, "states"),
+        (Some(r#"{"states": {"canceled": "Canceled"}}"#), "states"),
+        (
+            Some(r#"{"states": {"abandoned": "Done"}}"#),
+            "of type completed",
+        ),
+        (
+            Some(r#"{"states": {"abandoned": "Dropped"}}"#),
+            "no state \"Dropped\"",
+        ),
+    ] {
+        let fake = abandon_fake(config);
+        fake.state()
+            .add_comment("claim: agent-a thread-1\nfrom: Todo");
+        let output = release(&fake, &["--reason", "superseded", "--abandon"]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{config:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains(message),
+            "{config:?}: {}",
+            stderr(&output)
+        );
+        assert_eq!(fake.mutations(), 0, "{config:?}");
+        assert_eq!(fake.state().issue_state, "In Progress");
+    }
+}
+
+#[test]
+fn release_abandon_conflicts_with_done() {
+    let fake = abandon_fake(Some(ABANDONED_CONFIG));
+    let output = release(&fake, &["--reason", "x", "--abandon", "--done"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(fake.state().requests.is_empty());
 }
