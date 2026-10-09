@@ -80,7 +80,7 @@ Repository:
 
 - Commands and flags: `atb --help`, `atb quota --help`, `atb linear --help`.
 - Credential sources, proxy, exit statuses and the Linear key: [README](../README.md), sections "`atb quota`" and "`atb linear`".
-- The claim protocol and how agents use it: [.agents/skills/linear/SKILL.md](../.agents/skills/linear/SKILL.md).
+- The claim protocol, states and config file: [README](../README.md), section "`atb linear`".
 - Cutting a release: [docs/knowledge/release.md](knowledge/release.md).
 - Automation: [ci.yml](../.github/workflows/ci.yml), [release.yml](../.github/workflows/release.yml).
 

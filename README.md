@@ -60,22 +60,92 @@ atb linear project create --team <KEY> --name <name> [--description-file <file>]
 atb linear query <GRAPHQL | FILE>
 ```
 
-Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; writes other comments (a body starting with `claim:` or `release:` is refused); creates issues, optionally as sub-issues of a parent; creates a project unless one with the name exists (a same-named project that is archived, on another team, or one of several is an error and nothing is written; one in the trash does not count); runs read-only GraphQL queries (a document with a mutation or subscription is refused before it is sent). The protocol, the exit statuses (3: claim lost, 4: release refused) and example queries are in [`.agents/skills/linear/SKILL.md`](.agents/skills/linear/SKILL.md).
+Claims and releases Linear issues by comment, so that agents sharing one Linear account can see who is working on what; writes other comments; creates issues, optionally as sub-issues of a parent; creates a project unless one with the name exists; runs read-only GraphQL queries. Examples below use `ABC-123` for an issue and `TEAM` for a team key.
+
+```sh
+atb linear claim ABC-123 --agent docs-impl --source thread-42 --scope 'my-repo: src/, docs/'
+atb linear release ABC-123 --agent docs-impl --reason merged --done
+atb linear release ABC-123 --agent docs-impl --reason 'blocked on review'
+atb linear release ABC-123 --agent docs-impl --reason 'approach does not work' --abandon
+atb linear release ABC-123 --agent my-orchestra --force 'stale for three days, holder gone'
+atb linear comment ABC-123 --body-file notes.md
+atb linear create --team TEAM --project 'Project name' --title 'Short title' --description-file body.md --label bug
+atb linear create --team TEAM --parent ABC-123 --title 'Second attempt' --description-file body.md
+atb linear project create --team TEAM --name 'Project name' --description-file overview.md
+atb linear query '{ viewer { id } }'
+```
+
+### Claim, conflict and holder
+
+`claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>` (the source is a thread key or the name of the dispatching agent), line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before. After writing it, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. An earlier claim by the same agent is not a conflict. This is not a lock: two agents can still claim within the same moment, and the work then shows as a merge conflict on a pull request.
+
+The current holder is the agent named in the latest `claim:` comment that has no later `release:` comment by the same agent. `release: <agent> lost`, `release: <agent> abandoned: ...` and `release: <agent> forced by ...` count as releases by `<agent>`. With no such claim the issue has no holder. If a `claim` fails after its comment was written but before the conflict check finished, it says so on stderr; run it again or release it.
+
+### Release
+
+`release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. Without either, the state the claim recorded in `from:` is restored. `--todo` is deprecated: it is accepted and does nothing, since restoring is the default.
+
+### Comment, create, project, query
+
+- `comment` writes the file's content as one comment, verbatim, and prints its URL (`{"id", "url"}` with `--json`). It refuses a body that is empty or whitespace only, or whose first line, after leading whitespace, starts with `claim:` or `release:` (exit 2). Nothing is sent in that case.
+- `create` resolves the team by key and the project by name within that team (missing or ambiguous: error) and prints `<identifier> <url>`, or JSON with `--json`. It adds the labels given with `--label` (repeatable) and those in `default_labels` of the config file, each once; a label that is neither a workspace label nor the team's own is created on the team. `--parent <ISSUE>` creates a sub-issue of that issue, looked up before anything is written (missing: exit 1, nothing created); the parent may be on another team, and the new issue goes on `--team` either way.
+- `project create` is idempotent by name. It looks up every project named exactly `<name>` (case-sensitive), archived ones included and projects in the trash left out. None: it creates the project on the team, with the file's Markdown as the project's content (Linear's short `description` stays empty), and prints `<name> <url>`. Exactly one, on the team and not archived: it prints that project and changes nothing. An archived one, one not on the team, or more than one: exit 1, nothing written. `--json` prints `{"name", "url", "id", "created"}`.
+- `query` takes a file path if such a file exists, otherwise the query text, and prints the response's `data` as JSON. It is read-only: a document containing a `mutation` or `subscription` operation is refused before anything is sent.
+
+Example queries (the filters follow Linear's schema and have not been run against a real workspace):
+
+```sh
+# Open issues assigned to the shared account
+atb linear query '{ viewer { assignedIssues(filter: {state: {type: {nin: ["completed", "canceled"]}}}) { nodes { identifier title state { name } } } } }'
+# Comments on one issue: who holds it
+atb linear query '{ issue(id: "ABC-123") { comments { nodes { body createdAt } } } }'
+```
+
+### Exit statuses
+
+| Exit status | Meaning |
+|---|---|
+| 0 | Success (`claim`: the issue is yours) |
+| 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, a project with the name is archived, off the team or exists more than once, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
+| 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`), or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
+| 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written |
+| 4 | `release` refused: the issue has no holder, or the holder is another agent and `--force` was not given |
+
+### API key
 
 The API key comes from the environment, never from a flag:
 
-1. `LINEAR_API_KEY`: the key itself.
-2. `LINEAR_API_KEY_CMD`: a command that prints the key, such as a secret manager's read command. It runs through `sh -c` and its stderr is discarded. The output is cached for 24 hours in `$XDG_CONFIG_HOME/linear/api-key` (default `~/.config/linear/api-key`, under `$ATB_HOME` if set), mode 0600 in a 0700 directory; an existing directory is tightened to 0700. On a 401 the command runs once more and the request is retried once.
+1. `LINEAR_API_KEY`: the key itself. A 401 is an error.
+2. `LINEAR_API_KEY_CMD`: a command that prints the key, such as a secret manager's read command. It runs through `sh -c` and its stderr is discarded. The trimmed output is cached for 24 hours in `$XDG_CONFIG_HOME/linear/api-key` (default `~/.config/linear/api-key`, under `$ATB_HOME` if set), mode 0600 in a 0700 directory; an existing directory is tightened to 0700. On a 401 the command runs once more and the request is retried once; a second 401 is an error.
 
-States are chosen by type, not by name: `claim` sets the first `started` state and records the prior one in its comment, `release --done` sets the first `completed` state, `release --abandon` sets the `canceled` state the config names under `abandoned` (there is no default), and `release` without either restores the recorded state (falling back to the first `unstarted`, then the first `backlog` state). An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.json` (default `~/.config/linear/config.json`, under `$ATB_HOME` if set), names the state to use for a type and labels that `create` always adds:
+To check that the key works without printing it: `atb linear query '{ viewer { id } }' >/dev/null && echo usable || echo unusable`.
+
+### States
+
+States are chosen by type, not by name. Among the team's states of one type the first is the one with the lowest position (the order Linear shows), ties broken by name, then id.
+
+| Command | State |
+|---|---|
+| `claim` | the first `started` state |
+| `release --done` | the first `completed` state |
+| `release --abandon` | the state named by `states.abandoned`, which must be of type `canceled`; no default |
+| `release` (giving up, or `--force`) | the state in the claim's `from:` line; if there is none (a claim written by 0.2.0) or the team no longer has a state of that name, the first `unstarted` state, else the first `backlog` state |
+
+When `release` finds no state to restore, it has still written its comment; it then exits 1 and leaves the state alone.
+
+### Configuration
+
+An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.json` (default `~/.config/linear/config.json`, under `$ATB_HOME` if set), names the state to use for a type (`states`) and the labels `create` always adds (`default_labels`). Both keys are optional and a missing file is an empty config:
 
 ```json
-{"states": {"started": "Active", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
+{"states": {"started": "Active", "unstarted": "Ready", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
 ```
 
-Both keys are optional and the state names are examples; the skill has the details.
+`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used, the release fallbacks included. An override naming a state the team does not have, with that type, is an error and nothing is changed (for `release`, after its comment). A config file that cannot be read or parsed is an error naming the file.
 
-`LINEAR_API_URL` overrides the endpoint (`https://api.linear.app/graphql`). Each request has a 30 s timeout and follows no redirects.
+### Endpoint
+
+`LINEAR_API_URL` overrides the endpoint (`https://api.linear.app/graphql`). Each request has a 30 s timeout and follows no redirects. A 429 is reported with its `retry-after` value and is never retried.
 
 ## Build
 
