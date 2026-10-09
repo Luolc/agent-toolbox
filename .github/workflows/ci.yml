@@ -61,3 +61,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
         run: cargo doc --no-deps --locked
+
+      - name: Design document length
+        run: |
+          .github/scripts/design-length.test.sh
+          .github/scripts/design-length.sh

@@ -18,9 +18,16 @@ Tool first, target harness second: `atb <tool> <harness>`, with the harness (`cl
 
 Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json`) only to build request headers. A token value never appears in output, logs, error messages or test fixtures; tests use synthetic files under a temporary home. Every credential location must be overridable (`--config-dir`, the harness's own variable, `ATB_HOME`; the README lists the precedence) so tests never touch the real home. A token may also be passed directly, only through an environment variable, never a flag. The Linear key comes from `LINEAR_API_KEY`, or from the output of the command in `LINEAR_API_KEY_CMD`, cached for 24 hours in `$XDG_CONFIG_HOME/linear/api-key` (mode 0600, directory 0700); the command's stderr is never shown.
 
+## Layout and docs
+
+- `docs/design.md` is the one design document: current state only, edited in place, five sections and a decision log, at most 200 lines (checked in CI). It is edited only in a design pass the orchestra triggers; every other PR fills in "Design impact" in the template.
+- Every PR follows `.github/pull_request_template.md`.
+- Manuals live in `docs/knowledge/` (the release manual). The CLI reference is `atb --help`.
+- There are no ADRs, research notes or to-do list in the repository. Open work lives in Linear and is claimed and released with `atb linear` (see `.agents/skills/linear/SKILL.md`).
+
 ## Quality checks and merging
 
 - Local: `pre-commit run --all-files` (gitleaks on the staged diff, `cargo fmt --check`); run `pre-commit install` once after cloning. Before pushing also run `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`.
 - After `cargo publish --dry-run`, `cargo test` can run a stale binary and miss source edits. Run `cargo clean -p agent-toolbox` before mutation runs and before any test run that follows a publish dry run.
-- CI: `.github/workflows/ci.yml`, job `check`: full-history gitleaks scan, `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, `cargo doc` with warnings denied. `check` is the required status check on `main`.
+- CI: `.github/workflows/ci.yml`, job `check`: full-history gitleaks scan, `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, `cargo doc` with warnings denied, the design document length check. `check` is the required status check on `main`.
 - Reviewers also load `.agents/skills/atb-pr-review`.
