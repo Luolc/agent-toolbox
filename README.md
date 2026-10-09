@@ -89,6 +89,8 @@ The current holder is the agent named in the latest `claim:` comment that has no
 
 `release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` (with `--force` the forced comment is unchanged) and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. Without either, the state the claim recorded in `from:` is restored; if the issue was already in a `started` state when claimed (for example after a lost claim), `from:` records that state and it is the one restored. `--todo` is deprecated: it is accepted and does nothing, since restoring is the default.
 
+If a release wrote its comment but failed to set the state, run the same command again: when the issue has no holder, the latest claim or release comment is that release (`release: <agent> ...` for `--reason`, `release: <holder> forced by <agent>: ...` for `--force`, with `<agent>` the one running it) and the issue is still in a `started` state, `release` writes no second comment, sets the state as the first run would have, says on stderr that it resumed, and exits 0.
+
 ### Comment, create, project, set-project, relate, query
 
 - `comment` writes the file's content as one comment, verbatim, and prints its URL (`{"id", "url"}` with `--json`). It refuses a body that is empty or whitespace only, or whose first line, after leading whitespace, starts with `claim:` or `release:` (exit 2) before the key is read, so nothing is sent.
@@ -115,7 +117,7 @@ atb linear query '{ issue(id: "ABC-123") { comments { nodes { body createdAt } }
 | 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, a project with the name is archived, off the team or exists more than once, `set-project` on an issue in another project or with no single project of that name on the team, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
 | 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`, and `relate` given the same issue twice), or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
 | 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written |
-| 4 | `release` refused: the issue has no holder, or the holder is another agent and `--force` was not given |
+| 4 | `release` refused: the issue has no holder (and the release is not a resume), or the holder is another agent and `--force` was not given |
 
 ### API key
 
@@ -137,7 +139,7 @@ States are chosen by type, not by name. Among the team's states of one type the 
 | `release --abandon` | the state named by `states.abandoned`, which must be of type `canceled`; no default |
 | `release` (giving up, or `--force`) | the state in the claim's `from:` line; if there is none (a claim written by 0.2.0) or the team no longer has a state of that name, the first `unstarted` state, else the first `backlog` state |
 
-When `release` finds no state to restore, it has still written its comment; it then exits 1 and leaves the state alone.
+The state is resolved before the comment: when `release` finds no state to set (no `completed` state for `--done`, or nothing to restore), it exits 1 with nothing written, and the holder keeps the claim.
 
 ### Configuration
 
@@ -147,7 +149,7 @@ An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.js
 {"states": {"started": "Active", "unstarted": "Ready", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
 ```
 
-`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used, the release fallbacks included. An override naming a state the team does not have, with that type, is an error and nothing is changed (for `release`, after its comment). A config file that cannot be read or parsed is an error naming the file.
+`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used, the release fallbacks included. An override naming a state the team does not have, with that type, is an error and nothing is changed. A config file that cannot be read or parsed is an error naming the file.
 
 ### Endpoint
 

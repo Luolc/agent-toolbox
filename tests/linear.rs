@@ -38,6 +38,8 @@ struct State {
     accepted: Vec<String>,
     /// From this many requests on, every key gets a 401.
     revoke_after: usize,
+    /// This many state updates get a 503 before one goes through.
+    failing_state_updates: usize,
     requests: Vec<Request>,
     /// The team's workflow states as (id, name, type, position).
     states: Vec<(String, String, String, f64)>,
@@ -283,8 +285,14 @@ impl State {
                     json!({"id": id, "name": name, "type": kind, "position": position})
                 })
                 .collect();
+            let kind = &self
+                .states
+                .iter()
+                .find(|s| s.1 == self.issue_state)
+                .unwrap()
+                .2;
             json!({"issue": {"id": "i-1", "identifier": ISSUE,
-                "state": {"name": self.issue_state}, "project": project,
+                "state": {"name": self.issue_state, "type": kind}, "project": project,
                 "team": {"id": "t-1", "key": "TEAM", "states": {"nodes": states}}}})
         } else if query.contains("viewer") {
             json!({"viewer": {"id": self.viewer_id}})
@@ -310,6 +318,7 @@ impl Fake {
         let mut state = State {
             accepted: accepted.iter().map(|k| (*k).to_owned()).collect(),
             revoke_after: usize::MAX,
+            failing_state_updates: 0,
             requests: Vec::new(),
             states: Vec::new(),
             issue_state: "Todo".into(),
@@ -365,6 +374,16 @@ impl Fake {
             .count()
     }
 
+    /// State updates sent so far, including those that failed.
+    fn state_updates(&self) -> usize {
+        let state = self.state();
+        state
+            .requests
+            .iter()
+            .filter(|r| r.query.contains("stateId"))
+            .count()
+    }
+
     /// The index of the first request whose query contains `needle`.
     fn first(&self, needle: &str) -> Option<usize> {
         self.state()
@@ -409,7 +428,13 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
             query: query.clone(),
             variables: body["variables"].clone(),
         });
-        if accepted {
+        if accepted && query.contains("stateId") && state.failing_state_updates > 0 {
+            state.failing_state_updates -= 1;
+            (
+                "503 Service Unavailable",
+                json!({"errors": [{"message": "Service unavailable"}]}),
+            )
+        } else if accepted {
             (
                 "200 OK",
                 json!({"data": state.answer(&query, &body["variables"])}),
@@ -631,17 +656,40 @@ fn the_unstarted_fallback_honours_the_config_override() {
 }
 
 #[test]
-fn release_without_a_state_to_restore_writes_the_comment_then_fails() {
-    let fake = Fake::start(&[KEY]);
-    fake.state()
-        .set_states(&[("In Progress", "started", 0.0), ("Done", "completed", 1.0)]);
-    fake.state().issue_state = "In Progress".into();
-    fake.state().add_comment("claim: agent-a thread-1");
-    let output = release(&fake, &["--reason", "blocked"]);
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(stderr(&output).contains("fall back"), "{}", stderr(&output));
-    assert_eq!(fake.comment_bodies()[1], "release: agent-a blocked");
-    assert_eq!(fake.first("issueUpdate"), None);
+fn release_without_a_state_to_set_writes_nothing_and_keeps_the_holder() {
+    // No state to restore, then no completed state for --done.
+    for (states, extra, says) in [
+        (
+            &[("In Progress", "started", 0.0), ("Done", "completed", 1.0)][..],
+            &["--reason", "blocked"][..],
+            "fall back",
+        ),
+        (
+            &[("Todo", "unstarted", 0.0), ("In Progress", "started", 1.0)][..],
+            &["--reason", "merged", "--done"][..],
+            "no completed state",
+        ),
+    ] {
+        let fake = Fake::start(&[KEY]);
+        fake.state().set_states(states);
+        fake.state().issue_state = "In Progress".into();
+        fake.state()
+            .add_comment("claim: agent-a thread-1\nfrom: Todo");
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(stderr(&output).contains(says), "{}", stderr(&output));
+        assert_eq!(fake.mutations(), 0);
+        assert_eq!(fake.comment_bodies().len(), 1);
+        // agent-a still holds the issue.
+        let args = ["release", ISSUE, "--agent", "agent-b", "--reason", "x"];
+        let output = linear(&fake, &args);
+        assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("held by agent-a"),
+            "{}",
+            stderr(&output)
+        );
+    }
 }
 
 #[test]
@@ -1533,5 +1581,96 @@ fn relate_with_a_missing_issue_writes_nothing() {
             stderr(&output)
         );
         assert_eq!(fake.mutations(), 0);
+    }
+}
+
+/// Release with `extra`, the state update failing once: exit 1 with the
+/// comment written. Returns the comment count.
+fn interrupted_release(fake: &Fake, extra: &[&str]) -> usize {
+    fake.state().failing_state_updates = 1;
+    let output = release(fake, extra);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(fake.state().issue_state, "In Progress");
+    fake.comment_bodies().len()
+}
+
+#[test]
+fn an_interrupted_release_is_resumed_without_a_second_comment() {
+    for (extra, end) in [
+        (&["--reason", "blocked"][..], "Todo"),
+        (&["--reason", "merged", "--done"][..], "Done"),
+        (&["--reason", "superseded", "--abandon"][..], "Abandoned"),
+    ] {
+        let fake = abandon_fake(Some(ABANDONED_CONFIG));
+        fake.state()
+            .add_comment("claim: agent-a thread-1\nscope: repo: src/\nfrom: Todo");
+        let written = interrupted_release(&fake, extra);
+        assert_eq!(written, 2);
+        let updates = fake.state_updates();
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(stderr(&output).contains("resuming"), "{}", stderr(&output));
+        assert_eq!(fake.comment_bodies().len(), written);
+        assert_eq!(fake.state_updates(), updates + 1);
+        assert_eq!(fake.state().issue_state, end);
+    }
+}
+
+#[test]
+fn an_interrupted_forced_release_is_resumed_only_by_the_forcing_agent() {
+    let fake = abandon_fake(None);
+    fake.state()
+        .add_comment("claim: agent-b thread-2\nscope: repo: src/\nfrom: Todo");
+    let written = interrupted_release(&fake, &["--force", "stale"]);
+    assert_eq!(
+        fake.comment_bodies()[1],
+        "release: agent-b forced by agent-a: stale"
+    );
+    for (agent, why) in [("agent-b", "--reason"), ("agent-c", "--force")] {
+        let args = ["release", ISSUE, "--agent", agent, why, "stale"];
+        let output = linear(&fake, &args);
+        assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    }
+    let updates = fake.state_updates();
+    let output = release(&fake, &["--force", "stale"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.comment_bodies().len(), written);
+    assert_eq!(fake.state_updates(), updates + 1);
+    assert_eq!(fake.state().issue_state, "Todo");
+}
+
+#[test]
+fn release_without_a_holder_is_not_a_resume_unless_its_own_release_is_latest_and_started() {
+    // Another agent's release is the latest.
+    let another = [
+        "claim: agent-b thread-2\nfrom: Todo",
+        "release: agent-b merged",
+    ];
+    // The issue left the started state after the release.
+    let moved_on = [
+        "claim: agent-a thread-1\nfrom: Todo",
+        "release: agent-a merged",
+    ];
+    // A later claim by another agent: agent-b holds the issue.
+    let claimed = [
+        "claim: agent-a thread-1\nfrom: Todo",
+        "release: agent-a merged",
+        "claim: agent-b thread-2\nfrom: In Progress",
+    ];
+    for (bodies, state, says) in [
+        (&another[..], "In Progress", "no holder"),
+        (&moved_on[..], "Done", "no holder"),
+        (&claimed[..], "In Progress", "held by agent-b"),
+    ] {
+        let fake = Fake::start(&[KEY]);
+        fake.state().issue_state = state.into();
+        for body in bodies {
+            fake.state().add_comment(body);
+        }
+        let output = release(&fake, &["--reason", "merged", "--done"]);
+        assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+        assert!(stderr(&output).contains(says), "{}", stderr(&output));
+        assert_eq!(fake.mutations(), 0);
+        assert_eq!(fake.state().issue_state, state);
     }
 }
