@@ -2024,6 +2024,37 @@ fn edit_refuses_an_empty_label_or_one_both_added_and_removed_before_the_key() {
 }
 
 #[test]
+fn edit_refuses_more_than_fifty_label_names_before_the_key() {
+    let fake = labelled_fake();
+    let cmd = KeyCommand::new("key-edit-too-many-labels", KEY);
+    let names: Vec<String> = (0..51).map(|n| format!("l{n}")).collect();
+    let mut args = vec!["linear", "edit", ISSUE, "--add-label", "l0"];
+    for (n, name) in names.iter().enumerate() {
+        args.push(if n % 2 == 0 {
+            "--add-label"
+        } else {
+            "--remove-label"
+        });
+        args.push(name);
+    }
+    let output = cmd.run(&fake, &args);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("51 label names given; one edit takes at most 50"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(cmd.runs(), 0);
+    assert!(fake.state().requests.is_empty());
+
+    // Fifty, the duplicate counted once, go through.
+    args.truncate(args.len() - 2);
+    let output = cmd.run(&fake, &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fake.state().requests[0].variables["first"], 50);
+}
+
+#[test]
 fn edit_of_a_missing_issue_changes_no_label() {
     let fake = labelled_fake();
     let output = linear(&fake, &["edit", "ABC-404", "--add-label", "new"]);

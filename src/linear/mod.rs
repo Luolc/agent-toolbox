@@ -27,6 +27,9 @@ pub const EXIT_RELEASE_REFUSED: u8 = 4;
 const EXIT_BODY_REFUSED: u8 = 2;
 /// `relate` given one issue twice, as for a usage error.
 const EXIT_SAME_ISSUE: u8 = 2;
+/// The most label names one `edit` takes, and the page size of its one read
+/// of the issue's labels, so that read sees every label named.
+const MAX_EDIT_LABELS: usize = 50;
 
 const AFTER_HELP: &str = "\
 Key sources, highest first:
@@ -173,8 +176,9 @@ enum Command {
     /// labels not named stay. Every field already as given (the description
     /// apart from trailing newlines, a label to add already on the issue, a
     /// label to remove not on it): printed, nothing written. An empty title,
-    /// description or label name, or a label both added and removed, is
-    /// refused (exit 2) before anything is sent
+    /// description or label name, a label both added and removed, or more
+    /// than 50 distinct label names, is refused (exit 2) before anything is
+    /// sent
     #[command(group = clap::ArgGroup::new("change").required(true).multiple(true))]
     Edit {
         /// Issue identifier, such as ABC-123
@@ -476,6 +480,14 @@ fn edit_input(
     if let Some(name) = add_labels.iter().find(|name| remove_labels.contains(name)) {
         return Ok(Err(format!("label {name:?} is both added and removed")));
     }
+    let names: std::collections::HashSet<&String> =
+        add_labels.iter().chain(remove_labels).collect();
+    if names.len() > MAX_EDIT_LABELS {
+        return Ok(Err(format!(
+            "{} label names given; one edit takes at most {MAX_EDIT_LABELS}",
+            names.len()
+        )));
+    }
     let Some(path) = description_file else {
         return Ok(Ok(None));
     };
@@ -503,8 +515,8 @@ fn edit(
 ) -> Result<u8, Error> {
     let names: Vec<&String> = add_labels.iter().chain(remove_labels).collect();
     let data = client.request(
-        "query($id: String!, $l: Boolean!, $n: [String!]) { issue(id: $id) { id identifier url title description team { id } labels(filter: {name: {in: $n}}) @include(if: $l) { nodes { id name } } } }",
-        json!({"id": ident, "l": !names.is_empty(), "n": names}),
+        "query($id: String!, $l: Boolean!, $n: [String!], $first: Int!) { issue(id: $id) { id identifier url title description team { id } labels(first: $first, filter: {name: {in: $n}}) @include(if: $l) { nodes { id name } } } }",
+        json!({"id": ident, "l": !names.is_empty(), "n": names, "first": MAX_EDIT_LABELS}),
     )?;
     let issue = &data["issue"];
     if issue.is_null() {
