@@ -61,6 +61,8 @@ struct State {
     relations: Vec<(String, String, String)>,
     issue_title: String,
     issue_description: Option<String>,
+    /// The ids of ISSUE's labels, from `labels`.
+    issue_labels: Vec<String>,
 }
 
 impl State {
@@ -180,6 +182,21 @@ impl State {
             if let Some(description) = input["description"].as_str() {
                 self.issue_description = Some(description.to_owned());
             }
+            assert!(
+                input.get("labelIds").is_none(),
+                "a whole label list: {input}"
+            );
+            let ids = |field: &str| -> Vec<String> {
+                input[field]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|id| id.as_str().unwrap().to_owned())
+                    .collect()
+            };
+            let removed = ids("removedLabelIds");
+            self.issue_labels.retain(|id| !removed.contains(id));
+            self.issue_labels.extend(ids("addedLabelIds"));
             json!({"issueUpdate": {"success": true}})
         } else if query.contains("issueUpdate") && query.contains("projectId") {
             self.issue_project = Some(vars["p"].as_str().unwrap().to_owned());
@@ -303,10 +320,28 @@ impl State {
                 .find(|s| s.1 == self.issue_state)
                 .unwrap()
                 .2;
-            json!({"issue": {"id": "i-1", "identifier": ISSUE, "url": ISSUE_URL,
+            let mut issue = json!({"id": "i-1", "identifier": ISSUE, "url": ISSUE_URL,
                 "title": self.issue_title, "description": self.issue_description,
                 "state": {"name": self.issue_state, "type": kind}, "project": project,
-                "team": {"id": "t-1", "key": "TEAM", "states": {"nodes": states}}}})
+                "team": {"id": "t-1", "key": "TEAM", "states": {"nodes": states}}});
+            if query.contains("labels(") && vars["l"] == true {
+                // Names matched ignoring case as a collation might: atb must
+                // compare them itself.
+                let names = vars["n"].as_array().unwrap();
+                let nodes: Vec<Value> = self
+                    .labels
+                    .iter()
+                    .filter(|l| self.issue_labels.contains(&l.0))
+                    .filter(|l| {
+                        names
+                            .iter()
+                            .any(|n| n.as_str().unwrap().eq_ignore_ascii_case(&l.1))
+                    })
+                    .map(|l| json!({"id": l.0, "name": l.1}))
+                    .collect();
+                issue["labels"] = json!({"nodes": nodes});
+            }
+            json!({"issue": issue})
         } else if query.contains("viewer") {
             json!({"viewer": {"id": self.viewer_id}})
         } else {
@@ -345,6 +380,7 @@ impl Fake {
             relations: Vec::new(),
             issue_title: "Old title".into(),
             issue_description: None,
+            issue_labels: Vec::new(),
         };
         state.set_states(&[
             ("Backlog", "backlog", 0.0),
@@ -1836,4 +1872,167 @@ fn edit_refuses_no_change_or_an_empty_title_or_description_before_any_request() 
     let output = cmd.run(&fake, &["linear", "edit", ISSUE, "--title", " "]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert_eq!(cmd.runs(), 0);
+}
+
+/// A fake whose ISSUE has workspace labels `a` (l-a) and `b` (l-b), and
+/// where a team label `c` (l-c) exists but is not on it.
+fn labelled_fake() -> Fake {
+    let fake = Fake::start(&[KEY]);
+    {
+        let mut state = fake.state();
+        state.labels = vec![
+            ("l-a".into(), "a".into(), None),
+            ("l-b".into(), "b".into(), None),
+            ("l-c".into(), "c".into(), Some("t-1".into())),
+        ];
+        state.issue_labels = vec!["l-a".into(), "l-b".into()];
+    }
+    fake
+}
+
+#[test]
+fn edit_adds_or_removes_only_the_labels_named() {
+    let fake = labelled_fake();
+    let output = edit(&fake, &["--add-label", "c", "--add-label", "c"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{ISSUE} {ISSUE_URL}\n"));
+    assert_eq!(edits(&fake), [json!({"addedLabelIds": ["l-c"]})]);
+    assert_eq!(fake.state().issue_labels, ["l-a", "l-b", "l-c"]);
+
+    let fake = labelled_fake();
+    let output = edit(&fake, &["--remove-label", "a", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": true})
+    );
+    assert_eq!(edits(&fake), [json!({"removedLabelIds": ["l-a"]})]);
+    assert_eq!(fake.state().issue_labels, ["l-b"]);
+}
+
+#[test]
+fn edit_with_labels_already_in_place_writes_and_looks_up_nothing() {
+    let fake = labelled_fake();
+    // `A` is not `a`: names compare exactly, so it is not on the issue.
+    fake.state().labels.push(("l-A".into(), "A".into(), None));
+    let output = edit(
+        &fake,
+        &[
+            "--add-label",
+            "a",
+            "--remove-label",
+            "c",
+            "--remove-label",
+            "A",
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": false})
+    );
+    assert!(
+        stderr(&output).contains("already has the given labels; nothing written"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+    assert_eq!(fake.first("issueLabels"), None);
+    assert_eq!(fake.state().issue_labels, ["l-a", "l-b"]);
+}
+
+#[test]
+fn edit_creates_a_missing_label_on_the_issues_team_then_adds_it() {
+    let fake = labelled_fake();
+    let output = edit(&fake, &["--add-label", "new"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let state = fake.state();
+    assert_eq!(
+        state.labels[3],
+        ("l-3".to_owned(), "new".to_owned(), Some("t-1".to_owned()))
+    );
+    let mutations: Vec<&Request> = state
+        .requests
+        .iter()
+        .filter(|r| r.query.starts_with("mutation"))
+        .collect();
+    assert_eq!(mutations.len(), 2);
+    assert!(mutations[0].query.contains("issueLabelCreate"));
+    assert_eq!(
+        mutations[1].variables["i"],
+        json!({"addedLabelIds": ["l-3"]})
+    );
+}
+
+#[test]
+fn edit_sends_a_title_and_label_changes_in_one_write() {
+    let fake = labelled_fake();
+    let output = edit(
+        &fake,
+        &[
+            "--title",
+            "T",
+            "--add-label",
+            "c",
+            "--remove-label",
+            "b",
+            "--add-label",
+            "a",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        edits(&fake),
+        [json!({"title": "T", "addedLabelIds": ["l-c"], "removedLabelIds": ["l-b"]})]
+    );
+    assert_eq!(fake.state().issue_labels, ["l-a", "l-c"]);
+
+    // A title already as given is left out of a label change.
+    let fake = labelled_fake();
+    let output = edit(&fake, &["--title", "Old title", "--remove-label", "a"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(edits(&fake), [json!({"removedLabelIds": ["l-a"]})]);
+}
+
+#[test]
+fn edit_refuses_an_empty_label_or_one_both_added_and_removed_before_the_key() {
+    let fake = labelled_fake();
+    let cmd = KeyCommand::new("key-edit-label-refused", KEY);
+    for extra in [
+        &["--add-label", "c", "--remove-label", "c"][..],
+        &["--add-label", " "],
+        &["--remove-label", ""],
+    ] {
+        let mut args = vec!["linear", "edit", ISSUE];
+        args.extend_from_slice(extra);
+        let output = cmd.run(&fake, &args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{extra:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("nothing sent"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    assert_eq!(cmd.runs(), 0);
+    assert!(fake.state().requests.is_empty());
+}
+
+#[test]
+fn edit_of_a_missing_issue_changes_no_label() {
+    let fake = labelled_fake();
+    let output = linear(&fake, &["edit", "ABC-404", "--add-label", "new"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no issue ABC-404"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+    assert_eq!(fake.first("issueLabels"), None);
 }
