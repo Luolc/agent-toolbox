@@ -1,7 +1,9 @@
-# Release: on a version tag, check the tag against the manifest version,
-# create a GitHub Release, attach the `atb` binary for four targets (fully
-# static musl for Linux, native for macOS) and publish the crate to
-# crates.io through Trusted Publishing. See docs/knowledge/release.md.
+# Release: on a version tag, run three checks (the tag matches the manifest
+# version, the tagged commit is on main, and its CI run on main passed at the
+# first attempt), then create a GitHub Release, attach the `atb` binary for
+# four targets (fully static musl for Linux, native for macOS) and publish
+# the crate to crates.io through Trusted Publishing. See
+# docs/knowledge/release.md.
 #
 # `ureq` uses rustls with `ring`, which compiles C. The Linux jobs get a
 # musl cross C compiler from setup-cross-toolchain-action; the macOS jobs
@@ -13,8 +15,9 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
   # Dry run; it never releases. It runs the guard against the tag given as
-  # input and builds, packages and checks all four targets, then stops: no
-  # Release, no upload, no publish.
+  # input and the other two checks against the commit it runs on, builds,
+  # packages and checks all four targets, then stops: no Release, no upload,
+  # no publish.
   workflow_dispatch:
     inputs:
       tag:
@@ -24,8 +27,9 @@ on:
         required: true
         type: string
   # A pull request that edits this file runs the build half of the dry run
-  # (no guard: there is no tag to compare), because `workflow_dispatch`
-  # only works once the file is on the default branch.
+  # (none of the three checks: there is no tag, and the PR's commit is not
+  # on main), because `workflow_dispatch` only works once the file is on the
+  # default branch.
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -39,7 +43,8 @@ jobs:
   # overwrite, while the GitHub Release calls itself v0.1.1. So assert
   # equality first, in the positive form: the version has to be read and
   # has to equal the tag, and anything else stops the run. Every other job
-  # needs this one, so a mismatch creates nothing anywhere.
+  # needs this one and the two checks below, so a failure of any of them
+  # creates nothing anywhere.
   guard:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
@@ -59,13 +64,47 @@ jobs:
           echo "tag=$TAG manifest=v$version"
           [ "$TAG" = "v$version" ]
 
+  # Only commits already merged into main are released. On a tag push
+  # GITHUB_SHA is the tagged commit; on a dry run, the commit it runs on.
+  on-main:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # The check compares against origin/main, which a shallow clone
+          # does not have.
+          fetch-depth: 0
+      - run: .github/scripts/release-on-main.sh "$GITHUB_SHA" origin/main
+
+  # Only commits whose ci.yml run on main passed at the first attempt are
+  # released; CI is not run again here.
+  ci-green:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    # The script waits for at most 30 minutes.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read # the CI runs of the tagged commit
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-ci-green.sh "$GITHUB_SHA"
+
   # The body is GitHub's generated notes: one line per pull request merged
   # since the previous Release, plus the compare link. PR titles are the
   # squash commit subjects, so that list is the changelog. `--verify-tag`
   # fails on a missing tag instead of creating one on the default branch.
   create-release:
     if: github.event_name == 'push'
-    needs: guard
+    needs: [guard, on-main, ci-green]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -81,11 +120,14 @@ jobs:
   # binary) and `atb-<target>.sha256` on every event, read-only: the upload
   # action always runs with `dry-run`, and the files leave as a workflow
   # artifact. Only `upload-assets` below can write to a Release. On a pull
-  # request `guard` is skipped, hence the explicit condition instead of
-  # plain `needs`.
+  # request the three checks are skipped, hence the explicit condition
+  # instead of plain `needs`.
   build:
-    needs: guard
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.guard.result == 'success') }}
+    needs: [guard, on-main, ci-green]
+    if: >-
+      ${{ !cancelled() && (github.event_name == 'pull_request' ||
+      (needs.guard.result == 'success' && needs.on-main.result == 'success' &&
+      needs.ci-green.result == 'success')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -201,7 +243,7 @@ jobs:
   # well. From the next version on, this job is the publish path.
   publish:
     if: github.event_name == 'push'
-    needs: guard
+    needs: [guard, on-main, ci-green]
     runs-on: ubuntu-24.04
     permissions:
       # `id-token: write` is the permission crates.io asks for; `contents:
