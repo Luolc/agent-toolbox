@@ -27,6 +27,9 @@ pub const EXIT_RELEASE_REFUSED: u8 = 4;
 const EXIT_BODY_REFUSED: u8 = 2;
 /// `relate` given one issue twice, as for a usage error.
 const EXIT_SAME_ISSUE: u8 = 2;
+/// The most label names one `edit` takes, and the page size of its one read
+/// of the issue's labels, so that read sees every label named.
+const MAX_EDIT_LABELS: usize = 50;
 
 const AFTER_HELP: &str = "\
 Key sources, highest first:
@@ -167,11 +170,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Set the issue's title to --title and replace its description with
-    /// the file's content, verbatim, and print its identifier and URL. Only
-    /// the fields given are sent. Values equal to the current ones (the
-    /// description apart from trailing newlines): printed, nothing written. An empty title or description is refused (exit 2)
-    /// before anything is sent
+    /// Set the issue's title to --title, replace its description with the
+    /// file's content, verbatim, add and remove the labels named, and print
+    /// its identifier and URL. Only the fields that differ are sent, and
+    /// labels not named stay. Every field already as given (the description
+    /// apart from trailing newlines, a label to add already on the issue, a
+    /// label to remove not on it): printed, nothing written. An empty title,
+    /// description or label name, a label both added and removed, or more
+    /// than 50 distinct label names, is refused (exit 2) before anything is
+    /// sent
     #[command(group = clap::ArgGroup::new("change").required(true).multiple(true))]
     Edit {
         /// Issue identifier, such as ABC-123
@@ -182,6 +189,13 @@ enum Command {
         /// Markdown for the new description, sent as it is
         #[arg(long, value_name = "FILE", group = "change")]
         description_file: Option<PathBuf>,
+        /// A label to add, matched exactly; repeatable. A missing label is
+        /// created on the issue's team, as for create
+        #[arg(long = "add-label", value_name = "NAME", group = "change")]
+        add_labels: Vec<String>,
+        /// A label to remove, matched exactly; repeatable
+        #[arg(long = "remove-label", value_name = "NAME", group = "change")]
+        remove_labels: Vec<String>,
         /// Print identifier, URL and whether it changed as JSON
         #[arg(long)]
         json: bool,
@@ -262,13 +276,21 @@ pub fn run(args: Args) -> Result<u8, Error> {
         },
         _ => None,
     };
-    // And an edit: an empty title or description is refused before the key.
+    // And an edit: an empty title, description or label name, or a label
+    // both added and removed, is refused before the key.
     let description = match &args.command {
         Command::Edit {
             title,
             description_file,
+            add_labels,
+            remove_labels,
             ..
-        } => match edit_input(title.as_deref(), description_file.as_deref())? {
+        } => match edit_input(
+            title.as_deref(),
+            description_file.as_deref(),
+            add_labels,
+            remove_labels,
+        )? {
             Ok(description) => description,
             Err(why) => {
                 eprintln!("error: {why}; nothing sent");
@@ -343,14 +365,27 @@ pub fn run(args: Args) -> Result<u8, Error> {
         } => set_project(&mut client, &issue, &project, json),
         Command::Relate { issue, other, json } => relate(&mut client, &issue, &other, json),
         Command::Edit {
-            issue, title, json, ..
-        } => edit(
-            &mut client,
-            &issue,
-            title.as_deref(),
-            description.as_deref(),
+            issue,
+            title,
+            mut add_labels,
+            mut remove_labels,
             json,
-        ),
+            ..
+        } => {
+            for labels in [&mut add_labels, &mut remove_labels] {
+                let mut seen = std::collections::HashSet::new();
+                labels.retain(|label| seen.insert(label.clone()));
+            }
+            edit(
+                &mut client,
+                &issue,
+                title.as_deref(),
+                description.as_deref(),
+                &add_labels,
+                &remove_labels,
+                json,
+            )
+        }
         Command::Project {
             command:
                 ProjectCommand::Create {
@@ -429,9 +464,29 @@ fn comment_body(path: &Path) -> Result<Result<String, String>, Error> {
 fn edit_input(
     title: Option<&str>,
     description_file: Option<&Path>,
+    add_labels: &[String],
+    remove_labels: &[String],
 ) -> Result<Result<Option<String>, String>, Error> {
     if title.is_some_and(|title| title.trim().is_empty()) {
         return Ok(Err("the title is empty".to_owned()));
+    }
+    if add_labels
+        .iter()
+        .chain(remove_labels)
+        .any(|name| name.trim().is_empty())
+    {
+        return Ok(Err("a label name is empty".to_owned()));
+    }
+    if let Some(name) = add_labels.iter().find(|name| remove_labels.contains(name)) {
+        return Ok(Err(format!("label {name:?} is both added and removed")));
+    }
+    let names: std::collections::HashSet<&String> =
+        add_labels.iter().chain(remove_labels).collect();
+    if names.len() > MAX_EDIT_LABELS {
+        return Ok(Err(format!(
+            "{} label names given; one edit takes at most {MAX_EDIT_LABELS}",
+            names.len()
+        )));
     }
     let Some(path) = description_file else {
         return Ok(Ok(None));
@@ -444,18 +499,24 @@ fn edit_input(
     Ok(Ok(Some(description)))
 }
 
-/// One `issueUpdate` with only the fields given, and none when they already
-/// hold those values (descriptions compared without trailing newlines).
+/// One `issueUpdate` with only the fields that differ from the issue's, and
+/// none when every field given already holds its value (descriptions compared
+/// without trailing newlines). Labels go by id in `addedLabelIds` and
+/// `removedLabelIds`, never as a whole list, so a label someone else changes
+/// meanwhile stays changed.
 fn edit(
     client: &mut Client,
     ident: &str,
     title: Option<&str>,
     description: Option<&str>,
+    add_labels: &[String],
+    remove_labels: &[String],
     as_json: bool,
 ) -> Result<u8, Error> {
+    let names: Vec<&String> = add_labels.iter().chain(remove_labels).collect();
     let data = client.request(
-        "query($id: String!) { issue(id: $id) { id identifier url title description } }",
-        json!({"id": ident}),
+        "query($id: String!, $l: Boolean!, $n: [String!], $first: Int!) { issue(id: $id) { id identifier url title description team { id } labels(first: $first, filter: {name: {in: $n}}) @include(if: $l) { nodes { id name } } } }",
+        json!({"id": ident, "l": !names.is_empty(), "n": names, "first": MAX_EDIT_LABELS}),
     )?;
     let issue = &data["issue"];
     if issue.is_null() {
@@ -463,19 +524,49 @@ fn edit(
     }
     let identifier = text(issue, "/identifier")?.to_owned();
     let url = text(issue, "/url")?.to_owned();
-    let mut input = serde_json::Map::new();
-    if let Some(title) = title {
-        input.insert("title".to_owned(), title.into());
-    }
-    if let Some(description) = description {
-        input.insert("description".to_owned(), description.into());
-    }
+    // (id, name) of the issue's labels; names compare exactly, whatever the
+    // filter matched.
+    let current: Vec<(&str, &str)> = issue
+        .pointer("/labels/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|l| Some((l["id"].as_str()?, l["name"].as_str()?)))
+        .collect();
     // Linear stores a description without its trailing newlines.
     let stored = |text: &str| text.trim_end_matches(['\r', '\n']).to_owned();
-    let changed = title.is_some_and(|title| issue["title"] != title)
-        || description.is_some_and(|description| {
-            issue["description"].as_str().map(stored) != Some(stored(description))
-        });
+    let mut input = serde_json::Map::new();
+    if let Some(title) = title.filter(|title| issue["title"] != *title) {
+        input.insert("title".to_owned(), title.into());
+    }
+    if let Some(description) = description.filter(|description| {
+        issue["description"].as_str().map(stored) != Some(stored(description))
+    }) {
+        input.insert("description".to_owned(), description.into());
+    }
+    let removed: Vec<&str> = current
+        .iter()
+        .filter(|(_, name)| remove_labels.iter().any(|n| n == name))
+        .map(|(id, _)| *id)
+        .collect();
+    if !removed.is_empty() {
+        input.insert("removedLabelIds".to_owned(), json!(removed));
+    }
+    let missing: Vec<&String> = add_labels
+        .iter()
+        .filter(|n| !current.iter().any(|(_, name)| name == n))
+        .collect();
+    // Resolved only now, so an issue that already has them looks up and
+    // creates nothing.
+    if !missing.is_empty() {
+        let team = text(issue, "/team/id")?.to_owned();
+        let ids = missing
+            .into_iter()
+            .map(|name| label_id(client, &team, name))
+            .collect::<Result<Vec<_>, _>>()?;
+        input.insert("addedLabelIds".to_owned(), json!(ids));
+    }
+    let changed = !input.is_empty();
     if changed {
         let data = client.request(
             "mutation($id: String!, $i: IssueUpdateInput!) { issueUpdate(id: $id, input: $i) { success } }",
@@ -485,10 +576,17 @@ fn edit(
             return Err(usage(format!("Linear did not update {identifier}")));
         }
     } else {
-        let fields: Vec<&str> = input.keys().map(String::as_str).collect();
+        let given: Vec<&str> = [
+            (title.is_some(), "title"),
+            (description.is_some(), "description"),
+            (!names.is_empty(), "labels"),
+        ]
+        .into_iter()
+        .filter_map(|(given, field)| given.then_some(field))
+        .collect();
         client.note(&format!(
             "{identifier} already has the given {}; nothing written",
-            fields.join(" and ")
+            given.join(" and ")
         ));
     }
     if as_json {
