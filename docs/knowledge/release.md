@@ -2,7 +2,7 @@
 
 A release is one tag push. `.github/workflows/release.yml` then checks the tag against `Cargo.toml`, creates the GitHub Release, attaches the binaries and publishes the crate to crates.io. The exception is the very first version: crates.io only accepts Trusted Publishing for a crate that already exists, so 0.1.0 goes to crates.io by hand, once (section 2).
 
-Releasing is the maintainer's call: an agent pushes a tag or publishes only on the maintainer's explicit instruction.
+Merging a pull request does not ship it. A change reaches users only in a release, and a machine that already has `atb` installed picks it up only after it is upgraded to that version.
 
 After v0.2.0, `atb linear` changes are released as patch versions (0.2.1, 0.2.2, ...).
 
