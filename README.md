@@ -84,15 +84,15 @@ atb linear query '{ viewer { id } }'
 
 ### Claim, conflict and holder
 
-`claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>` (the source is a thread key or the name of the dispatching agent), line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before. After writing it, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. An earlier claim by the same agent is not a conflict. This is not a lock: two agents can still claim within the same moment, and the work then shows as a merge conflict on a pull request.
+`claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>` (the source is a thread key or the name of the dispatching agent), line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before, recorded for reference only. After writing it, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. An earlier claim by the same agent is not a conflict. This is not a lock: two agents can still claim within the same moment, and the work then shows as a merge conflict on a pull request.
 
 The current holder is the agent named in the latest `claim:` comment that has no later `release:` comment by the same agent. `release: <agent> lost`, `release: <agent> abandoned: ...` and `release: <agent> forced by ...` count as releases by `<agent>`. With no such claim the issue has no holder. If a `claim` fails after its comment was written but before the conflict check finished, it says so on stderr; run it again or release it.
 
 ### Release
 
-`release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` (with `--force` the forced comment is unchanged) and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. Without either, the state the claim recorded in `from:` is restored; if the issue was already in a `started` state when claimed (for example after a lost claim), `from:` records that state and it is the one restored. `--todo` is deprecated: it is accepted and does nothing, since restoring is the default.
+`release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment ends the claim. Without `--done` or `--abandon` that is all: the state is left as it is, normally the `started` state the claim set, so an issue given up stays in progress. With `--done` or `--abandon` the comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` (with `--force` the forced comment is unchanged) and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. `--todo` is deprecated: it is accepted and does nothing.
 
-If a release wrote its comment but failed to set the state, run the same command again: when the issue has no holder, the latest claim or release comment is that release (`release: <agent> ...` for `--reason`, `release: <holder> forced by <agent>: ...` for `--force`, with `<agent>` the one running it) and the issue is still in a `started` state, `release` writes no second comment, sets the state as the first run would have, says on stderr that it resumed, and exits 0.
+If a release wrote its comment but failed to set the state, run the same command again: when the issue has no holder, the latest claim or release comment is that release (`release: <agent> ...` for `--reason`, `release: <holder> forced by <agent>: ...` for `--force`, with `<agent>` the one running it) and the issue is still in a `started` state, `release` writes no second comment, sets the state as the first run would have, says on stderr that it resumed, and exits 0. A release without `--done` or `--abandon` run again in the same situation has nothing left to do: it writes nothing, says so on stderr and exits 0.
 
 ### Comment, create, project, set-project, relate, query
 
@@ -141,19 +141,19 @@ States are chosen by type, not by name. Among the team's states of one type the 
 | `claim` | the first `started` state |
 | `release --done` | the first `completed` state |
 | `release --abandon` | the state named by `states.abandoned`, which must be of type `canceled`; no default |
-| `release` (giving up, or `--force`) | the state in the claim's `from:` line; if there is none (a claim written by 0.2.0) or the team no longer has a state of that name, the first `unstarted` state, else the first `backlog` state |
+| `release` (giving up, or `--force`) | none: the state is left as it is |
 
-The state is resolved before the comment: when `release` finds no state to set (no `completed` state for `--done`, or nothing to restore), it exits 1 with nothing written, and the holder keeps the claim.
+For `--done` and `--abandon` the state is resolved before the comment: when `release` finds no state to set (no `completed` state for `--done`), it exits 1 with nothing written, and the holder keeps the claim. A release without either sets no state, so it never fails for that reason.
 
 ### Configuration
 
 An optional config file beside the key cache, `$XDG_CONFIG_HOME/linear/config.json` (default `~/.config/linear/config.json`, under `$ATB_HOME` if set), names the state to use for a type (`states`) and the labels `create` always adds (`default_labels`). Both keys are optional and a missing file is an empty config:
 
 ```json
-{"states": {"started": "Active", "unstarted": "Ready", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
+{"states": {"started": "Active", "completed": "Done", "abandoned": "Abandoned"}, "default_labels": ["bug"]}
 ```
 
-`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used, the release fallbacks included. An override naming a state the team does not have, with that type, is an error and nothing is changed. A config file that cannot be read or parsed is an error naming the file.
+`abandoned` is not a state type: it names the `canceled` state that `release --abandon` sets, and a team may have several canceled states, so there is no fallback. An override applies wherever its type is used. An override naming a state the team does not have, with that type, is an error and nothing is changed. A config file that cannot be read or parsed is an error naming the file.
 
 ### Endpoint
 

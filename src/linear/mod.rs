@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::common::{Context, Error, Headers, http_post_json, usage};
 use config::Config;
 use key::Key;
-use states::{ABANDONED, BACKLOG, CANCELED, COMPLETED, STARTED, State, UNSTARTED};
+use states::{ABANDONED, CANCELED, COMPLETED, STARTED, State};
 
 const API_URL: &str = "https://api.linear.app/graphql";
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -85,10 +85,9 @@ enum Command {
         #[arg(long)]
         scope: String,
     },
-    /// Write a release comment for the current holder, then restore the
-    /// state from before the claim, set the first completed state with
-    /// --done, or the configured abandoned state with --abandon; exit 4 if
-    /// refused
+    /// Write a release comment for the current holder, ending the claim; the
+    /// state is left alone unless --done sets the first completed state or
+    /// --abandon the configured abandoned state; exit 4 if refused
     #[command(group = clap::ArgGroup::new("why").required(true))]
     Release {
         /// Issue identifier, such as ABC-123
@@ -102,7 +101,7 @@ enum Command {
         /// holder and --agent
         #[arg(long, group = "why", value_name = "WHY")]
         force: Option<String>,
-        /// Set the first completed state instead of restoring the prior one
+        /// Set the first completed state after the comment
         #[arg(long, conflicts_with = "todo")]
         done: bool,
         /// End the attempt as abandoned: the comment reads `release: <agent>
@@ -112,8 +111,7 @@ enum Command {
         /// state is missing or of another type, nothing is written
         #[arg(long, conflicts_with = "done")]
         abandon: bool,
-        /// Deprecated, accepted for 0.2.0 callers: does nothing, restoring
-        /// the prior state is the default
+        /// Deprecated, accepted for 0.2.0 callers: does nothing
         #[arg(long)]
         todo: bool,
     },
@@ -341,7 +339,7 @@ pub fn run(args: Args) -> Result<u8, Error> {
             let end = match (done, abandon) {
                 (true, _) => End::Done,
                 (_, true) => End::Abandon,
-                _ => End::Restore,
+                _ => End::Keep,
             };
             release(&mut client, &config, &issue, &agent, why, end)
         }
@@ -850,14 +848,13 @@ fn earlier_claim<'a>(comments: &'a [Comment], mine: &str, agent: &str) -> Option
     })
 }
 
-/// The current holder and its claim comment: the latest claim that no later
-/// release by the same agent undoes. `release: <holder> lost` and
-/// `release: <holder> forced by ...` both count as releases by that holder.
-fn holder(comments: &[Comment]) -> Option<(&str, &str)> {
+/// The current holder: the agent of the latest claim that no later release
+/// by the same agent undoes. `release: <holder> lost` and `release: <holder>
+/// forced by ...` both count as releases by that holder.
+fn holder(comments: &[Comment]) -> Option<&str> {
     comments.iter().enumerate().rev().find_map(|(i, c)| {
         let (kind, who) = head(&c.body)?;
-        (kind == Kind::Claim && !released_after(&comments[i + 1..], who))
-            .then_some((who, c.body.as_str()))
+        (kind == Kind::Claim && !released_after(&comments[i + 1..], who)).then_some(who)
     })
 }
 
@@ -870,12 +867,12 @@ fn forced_by(body: &str) -> Option<&str> {
     words.next()?.strip_suffix(':')
 }
 
-/// The holder and claim of an interrupted release that `agent` can finish:
-/// the latest claim or release comment is a release this run would have
-/// written (`release: <agent> ...` for --reason, `release: <holder> forced by
-/// <agent>: ...` for --force), and the claim is the one it undid. Only asked
-/// when the issue has no holder.
-fn resumable<'a>(comments: &'a [Comment], agent: &str, why: &Why) -> Option<(&'a str, &'a str)> {
+/// The holder of a release that `agent` already wrote and can finish: the
+/// latest claim or release comment is a release this run would have written
+/// (`release: <agent> ...` for --reason, `release: <holder> forced by
+/// <agent>: ...` for --force), undoing an earlier claim by that holder. Only
+/// asked when the issue has no holder.
+fn resumable<'a>(comments: &'a [Comment], agent: &str, why: &Why) -> Option<&'a str> {
     let (i, (kind, who)) = comments
         .iter()
         .enumerate()
@@ -891,15 +888,8 @@ fn resumable<'a>(comments: &'a [Comment], agent: &str, why: &Why) -> Option<(&'a
     }
     comments[..i]
         .iter()
-        .rev()
-        .find(|c| head(&c.body) == Some((Kind::Claim, who)))
-        .map(|c| (who, c.body.as_str()))
-}
-
-/// The state recorded by `from: <name>`, which claim writes as the last line.
-/// Only the last line counts, so a scope spanning lines cannot forge it.
-fn claimed_from(claim: &str) -> Option<&str> {
-    claim.lines().skip(1).last()?.strip_prefix("from: ")
+        .any(|c| head(&c.body) == Some((Kind::Claim, who)))
+        .then_some(who)
 }
 
 fn claim(
@@ -951,33 +941,10 @@ enum Why {
     Force(String),
 }
 
-/// The state a release without --done restores: the one the claim recorded
-/// if the team still has it, else the first unstarted state, else the first
-/// backlog state. Overrides apply to both fallbacks.
-fn prior_state<'a>(issue: &'a Issue, claim: &str, config: &Config) -> Result<&'a State, Error> {
-    let recorded = claimed_from(claim);
-    if let Some(state) = recorded.and_then(|name| issue.states.iter().find(|s| s.name == name)) {
-        return Ok(state);
-    }
-    for kind in [UNSTARTED, BACKLOG] {
-        if let Some(state) = states::pick(&issue.states, kind, &config.states)? {
-            return Ok(state);
-        }
-    }
-    Err(usage(format!(
-        "the team of {} has no state {} and no {UNSTARTED} or {BACKLOG} state to fall back to; \
-         nothing written, state unchanged",
-        issue.identifier,
-        match recorded {
-            Some(name) => format!("named {name:?} (recorded by the claim)"),
-            None => "recorded by the claim".to_owned(),
-        }
-    )))
-}
-
 /// The state a release leaves the issue in.
 enum End {
-    Restore,
+    /// The state it is in, normally the started state the claim set.
+    Keep,
     Done,
     Abandon,
 }
@@ -1019,25 +986,32 @@ fn release(
         _ => None,
     };
     let all = comments(client, &issue)?;
-    let Some((holder, claim)) = holder(&all) else {
-        // A release whose comment was written but whose state was not set
-        // left no holder; finishing it must not write a second comment.
+    let Some(holder) = holder(&all) else {
+        // A release whose comment was written left no holder; running it
+        // again must not write a second comment.
         let resume = resumable(&all, agent, &why).filter(|_| issue.state_kind == STARTED);
-        let Some((holder, claim)) = resume else {
+        let Some(holder) = resume else {
             client.note(&format!(
                 "{} has no holder; nothing written, state unchanged",
                 issue.identifier
             ));
             return Ok(EXIT_RELEASE_REFUSED);
         };
-        let state = target_state(&issue, claim, end, abandoned, config)?;
-        client.note(&format!(
-            "{} was released by {agent} but is still {:?}; resuming: no comment written, \
-             setting the state",
-            issue.identifier, issue.state
-        ));
         let holder = holder.to_owned();
-        set_state(client, &issue, state)?;
+        match target_state(&issue, end, abandoned, config)? {
+            Some(state) => {
+                client.note(&format!(
+                    "{} was released by {agent} but is still {:?}; resuming: no comment \
+                     written, setting the state",
+                    issue.identifier, issue.state
+                ));
+                set_state(client, &issue, state)?;
+            }
+            None => client.note(&format!(
+                "{} was already released by {agent}; nothing written, state unchanged",
+                issue.identifier
+            )),
+        }
         client.print(&format!("released {} (held by {holder})", issue.identifier));
         return Ok(0);
     };
@@ -1058,27 +1032,28 @@ fn release(
     };
     // Resolved before the comment: a release that cannot set its state
     // writes nothing and leaves the holder in place.
-    let state = target_state(&issue, claim, end, abandoned, config)?;
+    let state = target_state(&issue, end, abandoned, config)?;
     let holder = holder.to_owned();
     comment(client, &issue, &body)?;
-    set_state(client, &issue, state)?;
+    if let Some(state) = state {
+        set_state(client, &issue, state)?;
+    }
     client.print(&format!("released {} (held by {holder})", issue.identifier));
     Ok(0)
 }
 
 /// The state a release sets: the abandoned state already resolved for
-/// --abandon, the first completed one for --done, else the prior state.
+/// --abandon, the first completed one for --done, none otherwise.
 fn target_state<'a>(
     issue: &'a Issue,
-    claim: &str,
     end: End,
     abandoned: Option<&'a State>,
     config: &Config,
-) -> Result<&'a State, Error> {
+) -> Result<Option<&'a State>, Error> {
     match (end, abandoned) {
-        (_, Some(state)) => Ok(state),
-        (End::Done, _) => issue.state_of_type(COMPLETED, config),
-        _ => prior_state(issue, claim, config),
+        (_, Some(state)) => Ok(Some(state)),
+        (End::Done, _) => issue.state_of_type(COMPLETED, config).map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -1523,7 +1498,7 @@ mod tests {
 
     #[test]
     fn holder_is_the_latest_claim_not_released_by_its_agent() {
-        let who = |bodies: &[&str]| holder(&thread(bodies)).map(|(who, _)| who.to_owned());
+        let who = |bodies: &[&str]| holder(&thread(bodies)).map(str::to_owned);
         assert_eq!(who(&[]), None);
         assert_eq!(who(&["claim: a s\nscope: x"]), Some("a".into()));
         assert_eq!(
