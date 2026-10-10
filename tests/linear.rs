@@ -646,101 +646,50 @@ fn a_malformed_config_is_an_error_naming_the_path_without_its_content() {
     assert!(fake.state().requests.is_empty());
 }
 
+/// The release by agent-b that shows whether `ISSUE` has a holder: exit 4
+/// with `no holder` or `held by <agent>` on stderr, nothing written.
+fn holder_check(fake: &Fake) -> String {
+    let args = ["release", ISSUE, "--agent", "agent-b", "--reason", "x"];
+    let output = linear(fake, &args);
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    stderr(&output)
+}
+
 #[test]
-fn release_restores_the_state_recorded_by_claim() {
+fn release_without_done_or_abandon_comments_and_leaves_the_state() {
     let fake = Fake::start(&[KEY]);
     fake.state().issue_state = "Backlog".into();
     let output = claim(&fake, "agent-a");
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(fake.state().issue_state, "In Progress");
+    let updates = fake.state_updates();
     let output = release(&fake, &["--reason", "blocked"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(fake.state().issue_state, "Backlog");
-}
-
-#[test]
-fn release_falls_back_to_the_first_unstarted_then_the_first_backlog_state() {
-    // A 0.2.0 claim, without a `from:` line.
-    let fake = Fake::start(&[KEY]);
-    fake.state().set_states(&[
-        ("Backlog", "backlog", 0.0),
-        ("Later", "unstarted", 5.0),
-        ("Ready", "unstarted", 1.0),
-        ("In Progress", "started", 2.0),
-    ]);
-    fake.state().issue_state = "In Progress".into();
-    fake.state()
-        .add_comment("claim: agent-a thread-1\nscope: repo: src/");
-    let output = release(&fake, &["--reason", "blocked"]);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(fake.state().issue_state, "Ready");
-
-    // The recorded state is gone and so is every unstarted state.
-    let fake = Fake::start(&[KEY]);
-    fake.state().set_states(&[
-        ("Archive", "backlog", 4.0),
-        ("Backlog", "backlog", 0.0),
-        ("In Progress", "started", 2.0),
-    ]);
-    fake.state().issue_state = "In Progress".into();
-    fake.state()
-        .add_comment("claim: agent-a thread-1\nscope: repo: src/\nfrom: Todo");
-    let output = release(&fake, &["--reason", "blocked"]);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(fake.state().issue_state, "Backlog");
-}
-
-#[test]
-fn the_unstarted_fallback_honours_the_config_override() {
-    let fake = Fake::start(&[KEY]);
-    fake.state().set_states(&[
-        ("Todo", "unstarted", 0.0),
-        ("Ready", "unstarted", 1.0),
-        ("In Progress", "started", 2.0),
-    ]);
-    fake.write_config(r#"{"states": {"unstarted": "Ready"}}"#);
-    fake.state().issue_state = "In Progress".into();
-    fake.state().add_comment("claim: agent-a thread-1");
-    let output = release(&fake, &["--reason", "blocked"]);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(fake.state().issue_state, "Ready");
+    assert_eq!(fake.comment_bodies()[1], "release: agent-a blocked");
+    assert_eq!(fake.comment_bodies().len(), 2);
+    assert_eq!(fake.state_updates(), updates);
+    assert_eq!(fake.state().issue_state, "In Progress");
+    assert!(holder_check(&fake).contains("no holder"));
 }
 
 #[test]
 fn release_without_a_state_to_set_writes_nothing_and_keeps_the_holder() {
-    // No state to restore, then no completed state for --done.
-    for (states, extra, says) in [
-        (
-            &[("In Progress", "started", 0.0), ("Done", "completed", 1.0)][..],
-            &["--reason", "blocked"][..],
-            "fall back",
-        ),
-        (
-            &[("Todo", "unstarted", 0.0), ("In Progress", "started", 1.0)][..],
-            &["--reason", "merged", "--done"][..],
-            "no completed state",
-        ),
-    ] {
-        let fake = Fake::start(&[KEY]);
-        fake.state().set_states(states);
-        fake.state().issue_state = "In Progress".into();
-        fake.state()
-            .add_comment("claim: agent-a thread-1\nfrom: Todo");
-        let output = release(&fake, extra);
-        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-        assert!(stderr(&output).contains(says), "{}", stderr(&output));
-        assert_eq!(fake.mutations(), 0);
-        assert_eq!(fake.comment_bodies().len(), 1);
-        // agent-a still holds the issue.
-        let args = ["release", ISSUE, "--agent", "agent-b", "--reason", "x"];
-        let output = linear(&fake, &args);
-        assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
-        assert!(
-            stderr(&output).contains("held by agent-a"),
-            "{}",
-            stderr(&output)
-        );
-    }
+    let fake = Fake::start(&[KEY]);
+    fake.state()
+        .set_states(&[("Todo", "unstarted", 0.0), ("In Progress", "started", 1.0)]);
+    fake.state().issue_state = "In Progress".into();
+    fake.state()
+        .add_comment("claim: agent-a thread-1\nfrom: Todo");
+    let output = release(&fake, &["--reason", "merged", "--done"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no completed state"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+    assert_eq!(fake.comment_bodies().len(), 1);
+    assert!(holder_check(&fake).contains("held by agent-a"));
 }
 
 #[test]
@@ -822,8 +771,11 @@ fn release_by_the_holder_comments_then_sets_the_first_completed_state() {
 }
 
 #[test]
-fn forced_release_names_the_holder_and_restores_the_state_with_the_deprecated_todo() {
+fn forced_release_names_the_holder_and_leaves_the_state_with_the_deprecated_todo() {
+    // A team with no unstarted or backlog state: nothing to fall back to.
     let fake = Fake::start(&[KEY]);
+    fake.state()
+        .set_states(&[("In Progress", "started", 0.0), ("Done", "completed", 1.0)]);
     fake.state().issue_state = "In Progress".into();
     fake.state()
         .add_comment("claim: agent-b thread-2\nscope: repo: src/\nfrom: Backlog");
@@ -833,7 +785,10 @@ fn forced_release_names_the_holder_and_restores_the_state_with_the_deprecated_to
         fake.comment_bodies()[1],
         "release: agent-b forced by agent-a: stale for three days"
     );
-    assert_eq!(fake.state().issue_state, "Backlog");
+    assert_eq!(fake.comment_bodies().len(), 2);
+    assert_eq!(fake.state_updates(), 0);
+    assert_eq!(fake.state().issue_state, "In Progress");
+    assert!(holder_check(&fake).contains("no holder"));
 }
 
 /// A key command that records each run in `counter` and prints `key_file`.
@@ -1648,7 +1603,6 @@ fn interrupted_release(fake: &Fake, extra: &[&str]) -> usize {
 #[test]
 fn an_interrupted_release_is_resumed_without_a_second_comment() {
     for (extra, end) in [
-        (&["--reason", "blocked"][..], "Todo"),
         (&["--reason", "merged", "--done"][..], "Done"),
         (&["--reason", "superseded", "--abandon"][..], "Abandoned"),
     ] {
@@ -1672,22 +1626,49 @@ fn an_interrupted_forced_release_is_resumed_only_by_the_forcing_agent() {
     let fake = abandon_fake(None);
     fake.state()
         .add_comment("claim: agent-b thread-2\nscope: repo: src/\nfrom: Todo");
-    let written = interrupted_release(&fake, &["--force", "stale"]);
+    let written = interrupted_release(&fake, &["--force", "stale", "--done"]);
     assert_eq!(
         fake.comment_bodies()[1],
         "release: agent-b forced by agent-a: stale"
     );
     for (agent, why) in [("agent-b", "--reason"), ("agent-c", "--force")] {
-        let args = ["release", ISSUE, "--agent", agent, why, "stale"];
+        let args = ["release", ISSUE, "--agent", agent, why, "stale", "--done"];
         let output = linear(&fake, &args);
         assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
     }
     let updates = fake.state_updates();
-    let output = release(&fake, &["--force", "stale"]);
+    let output = release(&fake, &["--force", "stale", "--done"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(fake.comment_bodies().len(), written);
     assert_eq!(fake.state_updates(), updates + 1);
-    assert_eq!(fake.state().issue_state, "Todo");
+    assert_eq!(fake.state().issue_state, "Done");
+}
+
+#[test]
+fn a_release_without_done_or_abandon_run_again_writes_nothing() {
+    for (holder, extra) in [
+        ("agent-a", &["--reason", "blocked"][..]),
+        ("agent-b", &["--force", "stale"][..]),
+    ] {
+        let fake = abandon_fake(None);
+        fake.state()
+            .add_comment(&format!("claim: {holder} thread-1\nfrom: Todo"));
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let requests = fake.state().requests.len();
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(stderr(&output).lines().count(), 1, "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("already released"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(fake.mutations(), 1);
+        assert_eq!(fake.comment_bodies().len(), 2);
+        assert!(fake.state().requests.len() > requests);
+        assert_eq!(fake.state().issue_state, "In Progress");
+    }
 }
 
 #[test]
