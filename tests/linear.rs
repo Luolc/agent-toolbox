@@ -772,10 +772,7 @@ fn release_by_the_holder_comments_then_sets_the_first_completed_state() {
 
 #[test]
 fn forced_release_names_the_holder_and_leaves_the_state_with_the_deprecated_todo() {
-    // A team with no unstarted or backlog state: nothing to fall back to.
     let fake = Fake::start(&[KEY]);
-    fake.state()
-        .set_states(&[("In Progress", "started", 0.0), ("Done", "completed", 1.0)]);
     fake.state().issue_state = "In Progress".into();
     fake.state()
         .add_comment("claim: agent-b thread-2\nscope: repo: src/\nfrom: Backlog");
@@ -789,6 +786,26 @@ fn forced_release_names_the_holder_and_leaves_the_state_with_the_deprecated_todo
     assert_eq!(fake.state_updates(), 0);
     assert_eq!(fake.state().issue_state, "In Progress");
     assert!(holder_check(&fake).contains("no holder"));
+}
+
+#[test]
+fn release_without_done_or_abandon_resolves_no_state() {
+    // A team with no unstarted, backlog or completed state: any state the
+    // plain path picked would fail or be written.
+    for (holder, extra) in [
+        ("agent-a", &["--reason", "blocked"][..]),
+        ("agent-b", &["--force", "stale"][..]),
+    ] {
+        let fake = Fake::start(&[KEY]);
+        fake.state().set_states(&[("In Progress", "started", 0.0)]);
+        fake.state().issue_state = "In Progress".into();
+        fake.state()
+            .add_comment(&format!("claim: {holder} thread-1\nfrom: Todo"));
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(fake.comment_bodies().len(), 2);
+        assert_eq!(fake.first("issueUpdate"), None);
+    }
 }
 
 /// A key command that records each run in `counter` and prints `key_file`.
