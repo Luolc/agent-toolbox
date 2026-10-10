@@ -1,5 +1,8 @@
-# PR check: full-history credential scan, then fmt / clippy / test / doc.
-# The job name `check` is the required status check on main.
+# PR and main check: credential scan of the new commits, then fmt / clippy /
+# test / doc, the design document length and the tests of the release
+# checks. The job name `check` is the required status check on main. A
+# release reads the result of this workflow on main; see
+# .github/scripts/release-ci-green.sh.
 
 name: CI
 
@@ -9,11 +12,16 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Every main commit needs a result of its own, since a release reads it, so
+  # each one gets its own group: a shared group would cancel a pending run
+  # when a newer one arrives. On a PR branch, a newer push cancels the older
+  # run.
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
+  pull-requests: read # gitleaks-action lists the commits of the PR
 
 jobs:
   check:
@@ -21,25 +29,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Full history: the credential scan reads historical commits.
+          # The scan below reads the commits of the PR or push, which a
+          # shallow clone would not have.
           fetch-depth: 0
 
       # pre-commit's gitleaks hook only sees the staged diff; CI has no
-      # staging area, so scan the whole history. Pinned by version and
-      # SHA-256 so a moved tag cannot change what runs. --redact keeps a
-      # hit from printing the secret into the Actions log.
-      - name: Credential scan (gitleaks, full history)
+      # staging area, so this step scans the commits of this PR or push, and
+      # gitleaks.yml scans the whole history weekly. The action runs gitleaks
+      # with --redact, so a hit does not print the secret into the log.
+      - name: Credential scan (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # The version the pre-commit hook pins.
           GITLEAKS_VERSION: 8.30.1
-          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/gitleaks.tar.gz"
-          curl -fsSL -o "$archive" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  $archive" | sha256sum -c -
-          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose .
+          # Commenting on the PR would need pull-requests: write; the job
+          # log and summary show the finding.
+          GITLEAKS_ENABLE_COMMENTS: false
 
       # rust-toolchain.toml pins the channel and components; rustup installs
       # them on first use.
@@ -66,3 +72,10 @@ jobs:
         run: |
           .github/scripts/design-length.test.sh
           .github/scripts/design-length.sh
+
+      - name: Release check tests
+        # The waiting arms of release-ci-green.test.sh poll without a pause.
+        timeout-minutes: 5
+        run: |
+          .github/scripts/release-on-main.test.sh
+          .github/scripts/release-ci-green.test.sh
