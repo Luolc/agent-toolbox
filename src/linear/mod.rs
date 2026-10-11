@@ -1,6 +1,7 @@
 //! `atb linear <command>`: claim and release Linear issues by comment, write
-//! comments, create and edit issues, create projects for agents, put an issue
-//! into a project, relate two issues, and run read-only GraphQL queries.
+//! comments, create and edit issues, create projects for agents and put them
+//! into initiatives, put an issue into a project, relate two issues, and run
+//! read-only GraphQL queries.
 
 mod config;
 mod document;
@@ -198,7 +199,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Projects: create
+    /// Projects: create, set-initiative
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
@@ -248,7 +249,34 @@ enum ProjectCommand {
         /// description)
         #[arg(long, value_name = "FILE")]
         description_file: Option<PathBuf>,
-        /// Print name, URL, id and whether it was created as JSON
+        /// Then add the project to the unarchived initiative named exactly
+        /// this (case-sensitive), looked up before anything is written: none
+        /// or several is an error and not even the project is created
+        #[arg(long, value_name = "NAME")]
+        initiative: Option<String>,
+        /// Print name, URL, id and whether it was created as JSON, with
+        /// --initiative also the initiative and whether it was linked
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add the project named exactly <PROJECT> to the initiative named
+    /// exactly --initiative, or with --remove take it out, and print the
+    /// project, the initiative and the project's URL. Other initiatives of the
+    /// project stay. Already as asked: printed, nothing written. No single
+    /// project with the name, an archived one, or no single unarchived
+    /// initiative with the name: exit 1, nothing written
+    SetInitiative {
+        /// Project name, matched exactly (case-sensitive) against every
+        /// project, archived ones included and those in the trash left out
+        project: String,
+        /// Initiative name, matched exactly (case-sensitive) against the
+        /// unarchived initiatives
+        #[arg(long, value_name = "NAME")]
+        initiative: String,
+        /// Take the project out of the initiative instead
+        #[arg(long)]
+        remove: bool,
+        /// Print project, initiative, URL and whether it changed as JSON
         #[arg(long)]
         json: bool,
     },
@@ -390,9 +418,26 @@ pub fn run(args: Args) -> Result<u8, Error> {
                     team,
                     name,
                     description_file,
+                    initiative,
                     json,
                 },
-        } => create_project(&mut client, &team, &name, description_file.as_deref(), json),
+        } => create_project(
+            &mut client,
+            &team,
+            &name,
+            description_file.as_deref(),
+            initiative.as_deref(),
+            json,
+        ),
+        Command::Project {
+            command:
+                ProjectCommand::SetInitiative {
+                    project,
+                    initiative,
+                    remove,
+                    json,
+                },
+        } => set_initiative(&mut client, &project, &initiative, remove, json),
     };
     result.map_err(|err| match err {
         Error::Usage(message) => Error::Usage(client.key.mask(&message)),
@@ -1148,16 +1193,20 @@ struct Project {
 }
 
 /// Every project named exactly `name`, archived ones included and trashed
-/// (deleted) ones left out, across pages, with whether `team` is among its
-/// teams. The name is compared here as well, so the match is
+/// (deleted) ones left out, across pages, with whether `team`, if given, is
+/// among its teams. The name is compared here as well, so the match is
 /// case-sensitive whatever collation the server uses.
-fn projects_named(client: &mut Client, name: &str, team: &str) -> Result<Vec<Project>, Error> {
+fn projects_named(
+    client: &mut Client,
+    name: &str,
+    team: Option<&str>,
+) -> Result<Vec<Project>, Error> {
     let mut all = Vec::new();
     let mut after = Value::Null;
     loop {
         let data = client.request(
-            "query($n: String!, $t: ID!, $after: String) { projects(first: 50, after: $after, includeArchived: true, filter: {name: {eq: $n}}) { nodes { id name url archivedAt trashed teams(filter: {id: {eq: $t}}) { nodes { id } } } pageInfo { hasNextPage endCursor } } }",
-            json!({"n": name, "t": team, "after": after}),
+            "query($n: String!, $t: ID, $team: Boolean!, $after: String) { projects(first: 50, after: $after, includeArchived: true, filter: {name: {eq: $n}}) { nodes { id name url archivedAt trashed teams(filter: {id: {eq: $t}}) @include(if: $team) { nodes { id } } } pageInfo { hasNextPage endCursor } } }",
+            json!({"n": name, "t": team, "team": team.is_some(), "after": after}),
         )?;
         let page = &data["projects"];
         for node in page["nodes"].as_array().into_iter().flatten() {
@@ -1190,6 +1239,7 @@ fn create_project(
     team_key: &str,
     name: &str,
     description_file: Option<&Path>,
+    initiative: Option<&str>,
     as_json: bool,
 ) -> Result<u8, Error> {
     let content = description_file
@@ -1199,7 +1249,10 @@ fn create_project(
         })
         .transpose()?;
     let team = team_id(client, team_key)?;
-    let mut existing = projects_named(client, name, &team)?;
+    let initiative = initiative
+        .map(|name| Ok::<_, Error>((name, initiative_id(client, name, "created")?)))
+        .transpose()?;
+    let mut existing = projects_named(client, name, Some(&team))?;
     if existing.len() > 1 {
         return Err(usage(format!(
             "{} projects are named {name:?}; nothing created",
@@ -1247,15 +1300,182 @@ fn create_project(
             (project, true)
         }
     };
+    let mut out = json!({
+        "name": project.name,
+        "url": project.url,
+        "id": project.id,
+        "created": created,
+    });
+    if let Some((initiative, id)) = initiative {
+        // A project just created is in no initiative yet.
+        let link = if created {
+            None
+        } else {
+            initiative_link(client, &project.id, &id)?
+        };
+        let linked =
+            link_initiative(client, &project, initiative, &id, link, false).inspect_err(|_| {
+                if created {
+                    client.note(&format!(
+                        "note: project {name:?} was created but not added to initiative \
+                         {initiative:?}; run the command again to add it"
+                    ));
+                }
+            })?;
+        out["initiative"] = initiative.into();
+        out["linked"] = linked.into();
+    }
     if as_json {
-        client.print_json(&json!({
-            "name": project.name,
-            "url": project.url,
-            "id": project.id,
-            "created": created,
-        }));
+        client.print_json(&out);
     } else {
         client.print(&format!("{} {}", project.name, project.url));
+    }
+    Ok(0)
+}
+
+/// The id of the one unarchived initiative named exactly `name`, across
+/// pages; none or several is an error saying nothing was `done`.
+fn initiative_id(client: &mut Client, name: &str, done: &str) -> Result<String, Error> {
+    let mut matches = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let data = client.request(
+            "query($n: String!, $after: String) { initiatives(first: 50, after: $after, filter: {name: {eq: $n}}) { nodes { id name } pageInfo { hasNextPage endCursor } } }",
+            json!({"n": name, "after": after}),
+        )?;
+        let page = &data["initiatives"];
+        for node in page["nodes"].as_array().into_iter().flatten() {
+            // Compared here too, so the match is case-sensitive whatever
+            // collation the server uses.
+            if text(node, "/name")? == name {
+                matches.push(text(node, "/id")?.to_owned());
+            }
+        }
+        if page.pointer("/pageInfo/hasNextPage") != Some(&Value::Bool(true)) {
+            break;
+        }
+        after = Value::from(text(page, "/pageInfo/endCursor")?);
+    }
+    let [id] = matches.as_slice() else {
+        return Err(usage(format!(
+            "{} unarchived initiatives are named {name:?}; exactly one is needed, nothing {done}",
+            matches.len()
+        )));
+    };
+    Ok(id.clone())
+}
+
+/// The id of the link between the project and the initiative, if there is
+/// one, read across pages of the project's links.
+fn initiative_link(
+    client: &mut Client,
+    project: &str,
+    initiative: &str,
+) -> Result<Option<String>, Error> {
+    let mut after = Value::Null;
+    loop {
+        let data = client.request(
+            "query($id: String!, $after: String) { project(id: $id) { initiativeToProjects(first: 50, after: $after) { nodes { id initiative { id } } pageInfo { hasNextPage endCursor } } } }",
+            json!({"id": project, "after": after}),
+        )?;
+        let page = &data["project"]["initiativeToProjects"];
+        for node in page["nodes"].as_array().into_iter().flatten() {
+            if text(node, "/initiative/id")? == initiative {
+                return Ok(Some(text(node, "/id")?.to_owned()));
+            }
+        }
+        if page.pointer("/pageInfo/hasNextPage") != Some(&Value::Bool(true)) {
+            return Ok(None);
+        }
+        after = Value::from(text(page, "/pageInfo/endCursor")?);
+    }
+}
+
+/// Add the project to the initiative, or with `remove` take it out, given
+/// the link between them, if any. Returns whether anything was written.
+fn link_initiative(
+    client: &mut Client,
+    project: &Project,
+    initiative: &str,
+    initiative_id: &str,
+    link: Option<String>,
+    remove: bool,
+) -> Result<bool, Error> {
+    let name = &project.name;
+    match (link, remove) {
+        (None, false) => {
+            let data = client.request(
+                "mutation($i: InitiativeToProjectCreateInput!) { initiativeToProjectCreate(input: $i) { success } }",
+                json!({"i": {"initiativeId": initiative_id, "projectId": project.id}}),
+            )?;
+            if data.pointer("/initiativeToProjectCreate/success") != Some(&Value::Bool(true)) {
+                return Err(usage(format!(
+                    "Linear did not add project {name:?} to initiative {initiative:?}"
+                )));
+            }
+            Ok(true)
+        }
+        (Some(link), true) => {
+            let data = client.request(
+                "mutation($id: String!) { initiativeToProjectDelete(id: $id) { success } }",
+                json!({"id": link}),
+            )?;
+            if data.pointer("/initiativeToProjectDelete/success") != Some(&Value::Bool(true)) {
+                return Err(usage(format!(
+                    "Linear did not take project {name:?} out of initiative {initiative:?}"
+                )));
+            }
+            Ok(true)
+        }
+        (Some(_), false) => {
+            client.note(&format!(
+                "project {name:?} is already in initiative {initiative:?}; nothing written"
+            ));
+            Ok(false)
+        }
+        (None, true) => {
+            client.note(&format!(
+                "project {name:?} is not in initiative {initiative:?}; nothing written"
+            ));
+            Ok(false)
+        }
+    }
+}
+
+/// The project and the initiative are both looked up before anything is
+/// written; only the link between the two changes.
+fn set_initiative(
+    client: &mut Client,
+    name: &str,
+    initiative: &str,
+    remove: bool,
+    as_json: bool,
+) -> Result<u8, Error> {
+    let projects = projects_named(client, name, None)?;
+    let [project] = projects.as_slice() else {
+        return Err(usage(format!(
+            "{} projects are named {name:?}; exactly one is needed, nothing written",
+            projects.len()
+        )));
+    };
+    if project.archived {
+        return Err(usage(format!(
+            "project {name:?} is archived ({}); nothing written",
+            project.url
+        )));
+    }
+    let id = initiative_id(client, initiative, "written")?;
+    let link = initiative_link(client, &project.id, &id)?;
+    let changed = link_initiative(client, project, initiative, &id, link, remove)?;
+    if as_json {
+        client.print_json(&json!({
+            "project": project.name,
+            "initiative": initiative,
+            "url": project.url,
+            "changed": changed,
+        }));
+    } else {
+        client.print(&format!("{} {initiative} {}", project.name, project.url));
     }
     Ok(0)
 }
