@@ -1357,7 +1357,7 @@ fn project_create_with_a_missing_or_ambiguous_initiative_creates_nothing() {
         assert!(
             stderr(&output).contains(&format!(
                 "{count} unarchived initiatives are named \"Initiative name\"; \
-                 exactly one is needed, nothing created"
+                 exactly one is needed, nothing written"
             )),
             "{}",
             stderr(&output)

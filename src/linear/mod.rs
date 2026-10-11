@@ -259,7 +259,7 @@ enum ProjectCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Add the project named exactly <PROJECT> to the initiative named
+    /// Add the project named exactly `<PROJECT>` to the initiative named
     /// exactly --initiative, or with --remove take it out, and print the
     /// project, the initiative and the project's URL. Other initiatives of the
     /// project stay. Already as asked: printed, nothing written. No single
@@ -1250,7 +1250,7 @@ fn create_project(
         .transpose()?;
     let team = team_id(client, team_key)?;
     let initiative = initiative
-        .map(|name| Ok::<_, Error>((name, initiative_id(client, name, "created")?)))
+        .map(|name| Ok::<_, Error>((name, initiative_id(client, name)?)))
         .transpose()?;
     let mut existing = projects_named(client, name, Some(&team))?;
     if existing.len() > 1 {
@@ -1334,8 +1334,8 @@ fn create_project(
 }
 
 /// The id of the one unarchived initiative named exactly `name`, across
-/// pages; none or several is an error saying nothing was `done`.
-fn initiative_id(client: &mut Client, name: &str, done: &str) -> Result<String, Error> {
+/// pages; none or several is an error.
+fn initiative_id(client: &mut Client, name: &str) -> Result<String, Error> {
     let mut matches = Vec::new();
     let mut after = Value::Null;
     loop {
@@ -1358,7 +1358,7 @@ fn initiative_id(client: &mut Client, name: &str, done: &str) -> Result<String, 
     }
     let [id] = matches.as_slice() else {
         return Err(usage(format!(
-            "{} unarchived initiatives are named {name:?}; exactly one is needed, nothing {done}",
+            "{} unarchived initiatives are named {name:?}; exactly one is needed, nothing written",
             matches.len()
         )));
     };
@@ -1464,7 +1464,7 @@ fn set_initiative(
             project.url
         )));
     }
-    let id = initiative_id(client, initiative, "written")?;
+    let id = initiative_id(client, initiative)?;
     let link = initiative_link(client, &project.id, &id)?;
     let changed = link_initiative(client, project, initiative, &id, link, remove)?;
     if as_json {
