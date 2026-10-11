@@ -63,6 +63,10 @@ struct State {
     issue_description: Option<String>,
     /// The ids of ISSUE's labels, from `labels`.
     issue_labels: Vec<String>,
+    /// Unarchived initiatives as (id, name).
+    initiatives: Vec<(String, String)>,
+    /// Project-to-initiative links as (id, initiative id, project id).
+    initiative_links: Vec<(String, String, String)>,
 }
 
 impl State {
@@ -108,8 +112,67 @@ impl State {
         self.projects.last_mut().unwrap().4 = true;
     }
 
+    fn add_initiative(&mut self, name: &str) -> String {
+        let id = format!("in-{}", self.initiatives.len());
+        self.initiatives.push((id.clone(), name.to_owned()));
+        id
+    }
+
+    fn link(&mut self, initiative: &str, project: &str) -> String {
+        let id = format!("ip-{}", self.initiative_links.len());
+        self.initiative_links
+            .push((id.clone(), initiative.to_owned(), project.to_owned()));
+        id
+    }
+
     fn answer(&mut self, query: &str, vars: &Value) -> Value {
-        if query.contains("team(id") && query.contains("projects(first") {
+        if query.contains("initiativeToProjectCreate") {
+            let input = &vars["i"];
+            self.link(
+                input["initiativeId"].as_str().unwrap(),
+                input["projectId"].as_str().unwrap(),
+            );
+            json!({"initiativeToProjectCreate": {"success": true}})
+        } else if query.contains("initiativeToProjectDelete") {
+            let before = self.initiative_links.len();
+            self.initiative_links.retain(|l| vars["id"] != l.0);
+            assert_eq!(self.initiative_links.len() + 1, before, "{vars}");
+            json!({"initiativeToProjectDelete": {"success": true}})
+        } else if query.contains("initiativeToProjects(first") {
+            // A project's links in pages of one.
+            let mine: Vec<_> = self
+                .initiative_links
+                .iter()
+                .filter(|l| vars["id"] == l.2)
+                .collect();
+            let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
+            let end = (start + 1).min(mine.len());
+            let nodes: Vec<Value> = mine[start..end]
+                .iter()
+                .map(|(id, initiative, _)| json!({"id": id, "initiative": {"id": initiative}}))
+                .collect();
+            json!({"project": {"initiativeToProjects": {"nodes": nodes, "pageInfo": {
+                "hasNextPage": end < mine.len(),
+                "endCursor": end.to_string(),
+            }}}})
+        } else if query.contains("initiatives(first") {
+            // Pages of one, names compared ignoring case as a collation might.
+            let matching: Vec<_> = self
+                .initiatives
+                .iter()
+                .filter(|i| i.1.eq_ignore_ascii_case(vars["n"].as_str().unwrap()))
+                .collect();
+            let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
+            let end = (start + 1).min(matching.len());
+            let nodes: Vec<Value> = matching[start..end]
+                .iter()
+                .map(|(id, name)| json!({"id": id, "name": name}))
+                .collect();
+            json!({"initiatives": {"nodes": nodes, "pageInfo": {
+                "hasNextPage": end < matching.len(),
+                "endCursor": end.to_string(),
+            }}})
+        } else if query.contains("team(id") && query.contains("projects(first") {
             // A team's projects in pages of one, names compared ignoring case;
             // archived (and so trashed) ones left out, as Linear does without
             // includeArchived.
@@ -381,6 +444,8 @@ impl Fake {
             issue_title: "Old title".into(),
             issue_description: None,
             issue_labels: Vec::new(),
+            initiatives: Vec::new(),
+            initiative_links: Vec::new(),
         };
         state.set_states(&[
             ("Backlog", "backlog", 0.0),
@@ -1216,6 +1281,237 @@ fn project_create_ignores_a_trashed_project_with_the_name() {
             "id": "p-11", "created": true})
     );
     assert_eq!(fake.state().created_projects.len(), 1);
+}
+
+/// The project and initiative ids of every link.
+fn links(fake: &Fake) -> Vec<(String, String)> {
+    fake.state()
+        .initiative_links
+        .iter()
+        .map(|(_, initiative, project)| (project.clone(), initiative.clone()))
+        .collect()
+}
+
+fn pair(project: &str, initiative: &str) -> (String, String) {
+    (project.to_owned(), initiative.to_owned())
+}
+
+#[test]
+fn project_create_with_an_initiative_adds_the_new_project_to_it_once() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_initiative("initiative name");
+    let initiative = fake.state().add_initiative("Initiative name");
+    let output = create_project(&fake, &["--initiative", "Initiative name", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"name": "Project name", "url": "https://linear.example/project/p-10",
+            "id": "p-10", "created": true, "initiative": "Initiative name", "linked": true})
+    );
+    assert_eq!(links(&fake), [pair("p-10", &initiative)]);
+
+    let output = create_project(&fake, &["--initiative", "Initiative name"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Project name https://linear.example/project/p-10"
+    );
+    assert!(
+        stderr(&output).contains("already in initiative"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 2);
+}
+
+#[test]
+fn project_create_with_an_initiative_adds_an_existing_project_to_it() {
+    let fake = Fake::start(&[KEY]);
+    let project = fake.state().add_project("Project name", &["t-1"]);
+    let other = fake.state().add_initiative("Other");
+    fake.state().link(&other, &project);
+    let initiative = fake.state().add_initiative("Initiative name");
+    let output = create_project(&fake, &["--initiative", "Initiative name", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"name": "Project name", "url": project_url(&project), "id": project,
+            "created": false, "initiative": "Initiative name", "linked": true})
+    );
+    assert_eq!(
+        links(&fake),
+        [pair(&project, &other), pair(&project, &initiative)]
+    );
+    assert_eq!(fake.mutations(), 1);
+}
+
+#[test]
+fn project_create_with_a_missing_or_ambiguous_initiative_creates_nothing() {
+    for (names, count) in [(&["initiative name"][..], 0), (&["Initiative name"; 2], 2)] {
+        let fake = Fake::start(&[KEY]);
+        for name in names {
+            fake.state().add_initiative(name);
+        }
+        let output = create_project(&fake, &["--initiative", "Initiative name"]);
+        assert_eq!(output.status.code(), Some(1), "{names:?}");
+        assert!(
+            stderr(&output).contains(&format!(
+                "{count} unarchived initiatives are named \"Initiative name\"; \
+                 exactly one is needed, nothing written"
+            )),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(fake.mutations(), 0);
+        assert!(fake.state().created_projects.is_empty());
+    }
+}
+
+fn set_initiative(fake: &Fake, extra: &[&str]) -> Output {
+    let mut args = vec![
+        "project",
+        "set-initiative",
+        "Project name",
+        "--initiative",
+        "Initiative name",
+    ];
+    args.extend_from_slice(extra);
+    linear(fake, &args)
+}
+
+#[test]
+fn set_initiative_adds_the_project_and_then_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    // Another case: not the project or the initiative asked for.
+    fake.state().add_project("project name", &["t-1"]);
+    let project = fake.state().add_project("Project name", &["t-2"]);
+    fake.state().add_initiative("initiative name");
+    let initiative = fake.state().add_initiative("Initiative name");
+    let other = fake.state().add_initiative("Other");
+    fake.state().link(&other, &project);
+    let output = set_initiative(&fake, &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        format!("Project name Initiative name {}", project_url(&project))
+    );
+    {
+        let state = fake.state();
+        let writes: Vec<_> = state
+            .requests
+            .iter()
+            .filter(|r| r.query.starts_with("mutation"))
+            .collect();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].variables,
+            json!({"i": {"initiativeId": initiative, "projectId": project}})
+        );
+    }
+    assert_eq!(
+        links(&fake),
+        [pair(&project, &other), pair(&project, &initiative)]
+    );
+
+    let output = set_initiative(&fake, &["--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"project": "Project name", "initiative": "Initiative name",
+            "url": project_url(&project), "changed": false})
+    );
+    assert!(
+        stderr(&output).contains("already in initiative"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 1);
+}
+
+#[test]
+fn set_initiative_remove_takes_the_project_out_and_then_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    let project = fake.state().add_project("Project name", &["t-1"]);
+    let other = fake.state().add_initiative("Other");
+    let initiative = fake.state().add_initiative("Initiative name");
+    fake.state().link(&other, &project);
+    let link = fake.state().link(&initiative, &project);
+    let output = set_initiative(&fake, &["--remove", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"project": "Project name", "initiative": "Initiative name",
+            "url": project_url(&project), "changed": true})
+    );
+    assert_eq!(links(&fake), [pair(&project, &other)]);
+    let delete = fake.first("initiativeToProjectDelete").unwrap();
+    assert_eq!(fake.state().requests[delete].variables, json!({"id": link}));
+
+    let output = set_initiative(&fake, &["--remove"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("is not in initiative"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 1);
+}
+
+#[test]
+fn set_initiative_refuses_a_missing_or_ambiguous_initiative() {
+    for (names, count) in [(&["initiative name"][..], 0), (&["Initiative name"; 2], 2)] {
+        let fake = Fake::start(&[KEY]);
+        fake.state().add_project("Project name", &["t-1"]);
+        for name in names {
+            fake.state().add_initiative(name);
+        }
+        for extra in [&[][..], &["--remove"]] {
+            let output = set_initiative(&fake, extra);
+            assert_eq!(output.status.code(), Some(1), "{names:?} {extra:?}");
+            assert!(
+                stderr(&output).contains(&format!(
+                    "{count} unarchived initiatives are named \"Initiative name\""
+                )),
+                "{}",
+                stderr(&output)
+            );
+        }
+        assert_eq!(fake.mutations(), 0);
+    }
+}
+
+#[test]
+fn set_initiative_refuses_a_missing_ambiguous_or_archived_project() {
+    let fake = Fake::start(&[KEY]);
+    fake.state().add_initiative("Initiative name");
+    fake.state().add_project("project name", &["t-1"]);
+    fake.state().add_trashed_project("Project name", &["t-1"]);
+    let output = set_initiative(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("0 projects are named"),
+        "{}",
+        stderr(&output)
+    );
+
+    // An archived one counts; the second is on the next page.
+    fake.state().add_archived_project("Project name", &["t-1"]);
+    let output = set_initiative(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("is archived"),
+        "{}",
+        stderr(&output)
+    );
+    fake.state().add_project("Project name", &["t-2"]);
+    let output = set_initiative(&fake, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("2 projects are named"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
 }
 
 fn comment(fake: &Fake, issue: &str, body: &str, extra: &[&str]) -> Output {
