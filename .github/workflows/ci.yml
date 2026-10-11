@@ -1,8 +1,8 @@
 # PR and main check: credential scan of the new commits, then fmt / clippy /
 # test / doc, the design document length and the tests of the release
 # checks. The job name `check` is the required status check on main. A
-# release reads the result of this workflow on main; see
-# .github/scripts/release-ci-green.sh.
+# release reads the result of this workflow on main (the `ci-green` job of
+# release.yml).
 
 name: CI
 
@@ -74,8 +74,4 @@ jobs:
           .github/scripts/design-length.sh
 
       - name: Release check tests
-        # The waiting arms of release-ci-green.test.sh poll without a pause.
-        timeout-minutes: 5
-        run: |
-          .github/scripts/release-on-main.test.sh
-          .github/scripts/release-ci-green.test.sh
+        run: .github/scripts/release-on-main.test.sh

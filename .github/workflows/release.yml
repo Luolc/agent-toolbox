@@ -81,22 +81,16 @@ jobs:
       - run: .github/scripts/release-on-main.sh "$GITHUB_SHA" origin/main
 
   # Only commits whose ci.yml run on main passed at the first attempt are
-  # released; CI is not run again here.
+  # released; CI is not run again here. The action checks GITHUB_SHA.
   ci-green:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    # The script waits for at most 30 minutes.
+    # The action waits for at most 30 minutes.
     timeout-minutes: 40
     permissions:
-      contents: read
       actions: read # the CI runs of the tagged commit
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: .github/scripts/release-ci-green.sh "$GITHUB_SHA"
+      - uses: Luolc/ci-actions/release-ci-green@afb3a5a9525f6153c9ce996c547b0a714115137e # main, 2026-10-11
 
   # The body is GitHub's generated notes: one line per pull request merged
   # since the previous Release, plus the compare link. PR titles are the
