@@ -16,11 +16,7 @@ On the machine you release from, in a clean checkout of this repository:
 git fetch origin && git status --porcelain && git rev-parse HEAD origin/main
 ```
 
-Done when `git status --porcelain` prints nothing and the two SHAs are equal. Then check the CI run that the push of that commit to `main` started, with the script the workflow's `ci-green` job runs (it needs `gh` and `jq`, and waits while the run is still going):
-
-```sh
-.github/scripts/release-ci-green.sh "$(git rev-parse HEAD)" Luolc/agent-toolbox
-```
+Done when `git status --porcelain` prints nothing and the two SHAs are equal. Then check the CI run that the push of that commit to `main` started, with the script of the `release-ci-green` action that the workflow's `ci-green` job runs. Run it as its README's ["Run it locally"](https://github.com/Luolc/ci-actions#run-it-locally) says, at the SHA `release.yml` pins, with `RELEASE_CI_GREEN_REPO=Luolc/agent-toolbox`.
 
 Done when it exits 0 after printing `conclusion success, run_attempt 1`. Any other exit means this commit is not released. When the run passed only at a later attempt, read the first attempt's log to find out why it failed; then release a later commit on `main` that passes.
 
