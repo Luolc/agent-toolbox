@@ -1,6 +1,6 @@
 # Releasing
 
-A release is one tag push. `.github/workflows/release.yml` then checks the tag against `Cargo.toml`, creates the GitHub Release, attaches the binaries and publishes the crate to crates.io. The exception is the very first version: crates.io only accepts Trusted Publishing for a crate that already exists, so 0.1.0 goes to crates.io by hand, once (section 2).
+A release is one tag push. `.github/workflows/release.yml` then checks the tag against `Cargo.toml`, checks that the tagged commit is on `main` and that its CI run on `main` passed at the first attempt, creates the GitHub Release, attaches the binaries and publishes the crate to crates.io. The exception is the very first version: crates.io only accepts Trusted Publishing for a crate that already exists, so 0.1.0 goes to crates.io by hand, once (section 2).
 
 Merging a pull request does not ship it. A change reaches users only in a release, and a machine that already has `atb` installed picks it up only after it is upgraded to that version.
 
@@ -16,9 +16,15 @@ On the machine you release from, in a clean checkout of this repository:
 git fetch origin && git status --porcelain && git rev-parse HEAD origin/main
 ```
 
-Done when `git status --porcelain` prints nothing and the two SHAs are equal. Then run the checks from `AGENTS.md` bare (no pipes) and read each exit code; all must be 0.
+Done when `git status --porcelain` prints nothing and the two SHAs are equal. Then check the CI run that the push of that commit to `main` started, with the script the workflow's `ci-green` job runs (it needs `gh` and `jq`, and waits while the run is still going):
 
-The tag is `v` followed by `version` in `Cargo.toml`, character for character. The workflow's `guard` job stops the whole run otherwise, before anything is created.
+```sh
+.github/scripts/release-ci-green.sh "$(git rev-parse HEAD)" Luolc/agent-toolbox
+```
+
+Done when it exits 0 after printing `conclusion success, run_attempt 1`. Any other exit means this commit is not released. When the run passed only at a later attempt, read the first attempt's log to find out why it failed; then release a later commit on `main` that passes.
+
+The tag is `v` followed by `version` in `Cargo.toml`, character for character, on a commit that meets the above. The workflow checks all three before anything is created: `guard` the tag, `on-main` that the commit is on `main`, and `ci-green` its CI run on `main` (waiting up to 30 minutes for a run still going); any of them failing stops the whole run.
 
 ## 2. First crates.io publish (once, for 0.1.0)
 
@@ -95,10 +101,10 @@ Done when readelf exits 0, the first count is 1 and the second is 0. Repeat for 
 
 ## 7. Dry run without releasing
 
-The same workflow has a `workflow_dispatch` entry that runs the guard against a tag given as input and builds, packages and checks all four targets, but creates no Release, uploads nothing and does not publish.
+The same workflow has a `workflow_dispatch` entry that runs the guard against a tag given as input, runs `on-main` and `ci-green` against the commit it runs on, and builds, packages and checks all four targets, but creates no Release, uploads nothing and does not publish. Run it from `main`, as below; on a commit that is not on `main`, `on-main` fails.
 
 ```sh
 gh workflow run release.yml --ref main -f tag=v0.1.0
 ```
 
-GitHub dispatches a workflow only once it exists on the default branch. A pull request that edits `release.yml` runs the build half of the same dry run (all four targets, no guard, since there is no tag to compare).
+GitHub dispatches a workflow only once it exists on the default branch. A pull request that edits `release.yml` runs the build half of the same dry run (all four targets, none of the three checks: there is no tag to compare, and the pull request's commit is not on `main`).

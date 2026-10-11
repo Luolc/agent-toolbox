@@ -10,7 +10,7 @@ The section or invariant of `docs/design.md` this changes and the test that guar
 
 ## Checks
 
-Each command run bare, with its exit code:
+The hooks and the checks the change touches, each run bare, with its exit code; CI runs the full set. Clippy and the tests are for a change to Rust code:
 
 - `pre-commit run --all-files`
 - `cargo clippy --all-targets --locked -- -D warnings`

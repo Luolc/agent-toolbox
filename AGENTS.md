@@ -27,6 +27,6 @@ Tools read vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth
 
 ## Quality checks
 
-- Local: `pre-commit run --all-files` (gitleaks on the staged diff, `cargo fmt --check`); run `pre-commit install` once after cloning. Before pushing also run `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`.
+- Local: `pre-commit run --all-files` (gitleaks on the staged diff, `cargo fmt --check`); run `pre-commit install` once after cloning. Before a push, run the hooks and the checks the change touches; for a change to Rust code that is `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. The full set runs in CI, and on a pull request the run of the required check is what counts.
 - After `cargo publish --dry-run`, `cargo test` can run a stale binary and miss source edits. Run `cargo clean -p agent-toolbox` before mutation runs and before any test run that follows a publish dry run.
-- CI: `.github/workflows/ci.yml`, job `check`: full-history gitleaks scan, `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, `cargo doc` with warnings denied, the design document length check. `check` is the required status check on `main`.
+- CI: `.github/workflows/ci.yml`, job `check`: a gitleaks scan of the commits of the pull request or push, `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, `cargo doc` with warnings denied, the design document length check, and the tests of the release checks. `.github/workflows/gitleaks.yml` scans the whole history once a week. `check` is the required status check on `main`.
