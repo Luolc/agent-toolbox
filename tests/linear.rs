@@ -1696,7 +1696,7 @@ fn release_abandon_conflicts_with_done() {
 }
 
 #[test]
-fn release_restore_sets_the_state_the_holders_latest_claim_recorded() {
+fn release_restore_sets_the_state_the_claim_opening_the_hold_recorded() {
     for (agent, extra) in [
         ("agent-a", &["--reason", "job ended", "--restore"][..]),
         ("agent-b", &["--force", "stale", "--restore"][..]),
@@ -1714,9 +1714,13 @@ fn release_restore_sets_the_state_the_holders_latest_claim_recorded() {
         fake.state().add_comment(&format!(
             "claim: {agent} thread-2\nscope: repo: src/\nfrom: Todo"
         ));
+        // A claim run again records the state the first one set.
+        fake.state().add_comment(&format!(
+            "claim: {agent} thread-2\nscope: repo: src/\nfrom: In Progress"
+        ));
         let output = release(&fake, extra);
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-        assert_eq!(fake.comment_bodies().len(), 4);
+        assert_eq!(fake.comment_bodies().len(), 5);
         assert_eq!(fake.state().issue_state, "Todo", "{extra:?}");
         assert!(fake.first("commentCreate").unwrap() < fake.first("issueUpdate").unwrap());
         assert!(holder_check(&fake).contains("no holder"));

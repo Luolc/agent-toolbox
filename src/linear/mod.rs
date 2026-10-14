@@ -51,7 +51,8 @@ config file $XDG_CONFIG_HOME/linear/config.json, beside the key cache, holds
 the state to use for a type instead of the first, and labels create adds.
 release --abandon sets the state named by \"states\": {\"abandoned\": ...},
 which must be of type `canceled`; without that entry it is an error. release
---restore sets the state on the `from:` line of the holder's latest claim.
+--restore sets the state on the `from:` line of the claim that opened the
+hold: the holder's first claim after its last release.
 
 Exit status: 0 on success, 1 on error, 2 on a usage error (including a
 comment body that is empty or starts with `claim:` or `release:`, and relate
@@ -114,8 +115,9 @@ enum Command {
         /// state is missing or of another type, nothing is written
         #[arg(long, conflicts_with = "done")]
         abandon: bool,
-        /// Set the state on the `from:` line of the holder's latest claim,
-        /// the state the issue was in before it. If that claim has no
+        /// Set the state on the `from:` line of the claim that opened the
+        /// hold (the holder's first claim after its last release), the state
+        /// the issue was in before it. If that claim has no
         /// `from:` line or the team has no state of that name, exit 1 with
         /// nothing written
         #[arg(long, conflicts_with_all = ["done", "abandon"])]
@@ -1055,7 +1057,12 @@ fn release(
             return Ok(EXIT_RELEASE_REFUSED);
         };
         let holder = holder.to_owned();
-        match target_state(&issue, end, abandoned, config, &all, &holder)? {
+        // The claims before the release this run resumes.
+        let undone = all
+            .iter()
+            .rposition(|c| head(&c.body) == Some((Kind::Release, holder.as_str())))
+            .unwrap_or(all.len());
+        match target_state(&issue, end, abandoned, config, &all[..undone], &holder)? {
             Some(state) => {
                 client.note(&format!(
                     "{} was released by {agent} but is still {:?}; resuming: no comment \
@@ -1118,17 +1125,21 @@ fn target_state<'a>(
     }
 }
 
-/// The team state named on the `from:` line of `holder`'s latest claim.
-/// While `holder` holds the issue that claim is the one being released, and
-/// on a resume it is the one the release undid.
+/// The team state named on the `from:` line of the claim that opened
+/// `holder`'s current hold: its first claim after its last release. A later
+/// claim by the same holder, such as a claim run again, records the started
+/// state the first one set.
 fn restored_state<'a>(
     issue: &'a Issue,
     comments: &[Comment],
     holder: &str,
 ) -> Result<&'a State, Error> {
-    let from = comments
+    let hold = comments
         .iter()
-        .rev()
+        .rposition(|c| head(&c.body) == Some((Kind::Release, holder)))
+        .map_or(0, |i| i + 1);
+    let from = comments[hold..]
+        .iter()
         .find(|c| head(&c.body) == Some((Kind::Claim, holder)))
         .and_then(|c| c.body.lines().find_map(|l| l.strip_prefix("from: ")))
         .map(str::trim);
