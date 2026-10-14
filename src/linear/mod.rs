@@ -50,7 +50,8 @@ config file $XDG_CONFIG_HOME/linear/config.json, beside the key cache, holds
 {\"states\": {\"<type>\": \"<state name>\", ...}, \"default_labels\": [...]}:
 the state to use for a type instead of the first, and labels create adds.
 release --abandon sets the state named by \"states\": {\"abandoned\": ...},
-which must be of type `canceled`; without that entry it is an error.
+which must be of type `canceled`; without that entry it is an error. release
+--restore sets the state on the `from:` line of the holder's latest claim.
 
 Exit status: 0 on success, 1 on error, 2 on a usage error (including a
 comment body that is empty or starts with `claim:` or `release:`, and relate
@@ -87,8 +88,9 @@ enum Command {
         scope: String,
     },
     /// Write a release comment for the current holder, ending the claim; the
-    /// state is left alone unless --done sets the first completed state or
-    /// --abandon the configured abandoned state; exit 4 if refused
+    /// state is left alone unless --done sets the first completed state,
+    /// --abandon the configured abandoned state or --restore the state the
+    /// claim recorded; exit 4 if refused
     #[command(group = clap::ArgGroup::new("why").required(true))]
     Release {
         /// Issue identifier, such as ABC-123
@@ -112,6 +114,12 @@ enum Command {
         /// state is missing or of another type, nothing is written
         #[arg(long, conflicts_with = "done")]
         abandon: bool,
+        /// Set the state on the `from:` line of the holder's latest claim,
+        /// the state the issue was in before it. If that claim has no
+        /// `from:` line or the team has no state of that name, exit 1 with
+        /// nothing written
+        #[arg(long, conflicts_with_all = ["done", "abandon"])]
+        restore: bool,
         /// Deprecated, accepted for 0.2.0 callers: does nothing
         #[arg(long)]
         todo: bool,
@@ -358,15 +366,17 @@ pub fn run(args: Args) -> Result<u8, Error> {
             force,
             done,
             abandon,
+            restore,
             todo: _,
         } => {
             let why = match force {
                 Some(why) => Why::Force(why),
                 None => Why::Reason(reason.expect("clap requires --reason or --force")),
             };
-            let end = match (done, abandon) {
-                (true, _) => End::Done,
-                (_, true) => End::Abandon,
+            let end = match (done, abandon, restore) {
+                (true, ..) => End::Done,
+                (_, true, _) => End::Abandon,
+                (.., true) => End::Restore,
                 _ => End::Keep,
             };
             release(&mut client, &config, &issue, &agent, why, end)
@@ -992,6 +1002,8 @@ enum End {
     Keep,
     Done,
     Abandon,
+    /// The state the holder's claim recorded on its `from:` line.
+    Restore,
 }
 
 /// The state named by `states.abandoned`, which must be a team state of type
@@ -1043,7 +1055,7 @@ fn release(
             return Ok(EXIT_RELEASE_REFUSED);
         };
         let holder = holder.to_owned();
-        match target_state(&issue, end, abandoned, config)? {
+        match target_state(&issue, end, abandoned, config, &all, &holder)? {
             Some(state) => {
                 client.note(&format!(
                     "{} was released by {agent} but is still {:?}; resuming: no comment \
@@ -1077,7 +1089,7 @@ fn release(
     };
     // Resolved before the comment: a release that cannot set its state
     // writes nothing and leaves the holder in place.
-    let state = target_state(&issue, end, abandoned, config)?;
+    let state = target_state(&issue, end, abandoned, config, &all, holder)?;
     let holder = holder.to_owned();
     comment(client, &issue, &body)?;
     if let Some(state) = state {
@@ -1088,18 +1100,51 @@ fn release(
 }
 
 /// The state a release sets: the abandoned state already resolved for
-/// --abandon, the first completed one for --done, none otherwise.
+/// --abandon, the first completed one for --done, the one `holder`'s claim
+/// recorded for --restore, none otherwise.
 fn target_state<'a>(
     issue: &'a Issue,
     end: End,
     abandoned: Option<&'a State>,
     config: &Config,
+    comments: &[Comment],
+    holder: &str,
 ) -> Result<Option<&'a State>, Error> {
     match (end, abandoned) {
         (_, Some(state)) => Ok(Some(state)),
         (End::Done, _) => issue.state_of_type(COMPLETED, config).map(Some),
+        (End::Restore, _) => restored_state(issue, comments, holder).map(Some),
         _ => Ok(None),
     }
+}
+
+/// The team state named on the `from:` line of `holder`'s latest claim.
+/// While `holder` holds the issue that claim is the one being released, and
+/// on a resume it is the one the release undid.
+fn restored_state<'a>(
+    issue: &'a Issue,
+    comments: &[Comment],
+    holder: &str,
+) -> Result<&'a State, Error> {
+    let from = comments
+        .iter()
+        .rev()
+        .find(|c| head(&c.body) == Some((Kind::Claim, holder)))
+        .and_then(|c| c.body.lines().find_map(|l| l.strip_prefix("from: ")))
+        .map(str::trim);
+    let Some(name) = from else {
+        return Err(usage(format!(
+            "the claim by {holder} on {} records no `from:` state to restore; nothing written",
+            issue.identifier
+        )));
+    };
+    issue.states.iter().find(|s| s.name == name).ok_or_else(|| {
+        usage(format!(
+            "the team of {} has no state {name:?} (the `from:` of the claim by {holder}); \
+             nothing written",
+            issue.identifier
+        ))
+    })
 }
 
 /// `args.labels` already holds the config's default labels, each once.
