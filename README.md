@@ -53,7 +53,7 @@ Every request honours the standard proxy variables. The first valid one of `ALL_
 
 ```sh
 atb linear claim <ISSUE> --agent <name> --source <source> --scope '<repo>: <paths>'
-atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [--done | --abandon | --todo]
+atb linear release <ISSUE> --agent <name> (--reason <reason> | --force <why>) [--done | --abandon | --restore | --todo]
 atb linear comment <ISSUE> --body-file <file> [--json]
 atb linear create --team <KEY> [--project <name>] [--parent <ISSUE>] --title <title> --description-file <file> [--label <name>]... [--json]
 atb linear project create --team <KEY> --name <name> [--description-file <file>] [--initiative <name>] [--json]
@@ -71,6 +71,7 @@ atb linear claim ABC-123 --agent docs-impl --source thread-42 --scope 'my-repo: 
 atb linear release ABC-123 --agent docs-impl --reason merged --done
 atb linear release ABC-123 --agent docs-impl --reason 'blocked on review'
 atb linear release ABC-123 --agent docs-impl --reason 'approach does not work' --abandon
+atb linear release ABC-123 --agent docs-lead --reason 'job ended' --restore
 atb linear release ABC-123 --agent my-orchestra --force 'stale for three days, holder gone'
 atb linear comment ABC-123 --body-file notes.md
 atb linear create --team TEAM --project 'Project name' --title 'Short title' --description-file body.md --label bug
@@ -88,15 +89,15 @@ atb linear query '{ viewer { id } }'
 
 ### Claim, conflict and holder
 
-`claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>` (the source is a thread key or the name of the dispatching agent), line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before, recorded for reference only. After writing it, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. An earlier claim by the same agent is not a conflict. This is not a lock: two agents can still claim within the same moment, and the work then shows as a merge conflict on a pull request.
+`claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>` (the source is a thread key or the name of the dispatching agent), line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before, which `release --restore` sets again. After writing it, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. An earlier claim by the same agent is not a conflict. This is not a lock: two agents can still claim within the same moment, and the work then shows as a merge conflict on a pull request.
 
 The current holder is the agent named in the latest `claim:` comment that has no later `release:` comment by the same agent. `release: <agent> lost`, `release: <agent> abandoned: ...` and `release: <agent> forced by ...` count as releases by `<agent>`. With no such claim the issue has no holder. If a `claim` fails after its comment was written but before the conflict check finished, it says so on stderr; run it again or release it.
 
 ### Release
 
-`release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment ends the claim. Without `--done` or `--abandon` that is all: the state is left as it is, normally the `started` state the claim set, so an issue given up stays in progress. With `--done` or `--abandon` the comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` (with `--force` the forced comment is unchanged) and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. `--todo` is deprecated: it is accepted and does nothing.
+`release` needs exactly one of `--reason <reason>` (the holder releases its own claim) or `--force <why>` (any agent releases the holder's claim; the comment reads `release: <holder> forced by <agent>: <why>`). The comment ends the claim. Without `--done`, `--abandon` or `--restore` that is all: the state is left as it is, normally the `started` state the claim set, so an issue given up stays in progress. With one of them the comment is written first, then the state is set. When the release is refused, nothing is written. With `--done` the state is the first `completed` one. With `--abandon` the comment reads `release: <agent> abandoned: <reason>` (with `--force` the forced comment is unchanged) and the state is the one named by `states.abandoned` in the config; `--abandon` combines with `--reason` or `--force`, not with `--done`, and exits 1 before writing anything if `states.abandoned` is unset or names a state that is missing or not of type `canceled`. With `--restore` the state is the one on the `from:` line of the claim that opened the hold: the holder's first claim after its last `release:` (with `--force`, the holder being released), the state the issue was in before that claim; a claim run again by the same holder records the `started` state and is skipped; `--restore` combines with `--reason` or `--force`, not with `--done` or `--abandon`, and exits 1 before writing anything if that claim has no `from:` line or the team has no state of that name. `--todo` is deprecated: it is accepted and does nothing.
 
-If a release wrote its comment but failed to set the state, run the same command again: when the issue has no holder, the latest claim or release comment is that release (`release: <agent> ...` for `--reason`, `release: <holder> forced by <agent>: ...` for `--force`, with `<agent>` the one running it) and the issue is still in a `started` state, `release` writes no second comment, sets the state as the first run would have, says on stderr that it resumed, and exits 0. A release without `--done` or `--abandon` run again in the same situation has nothing left to do: it writes nothing, says so on stderr and exits 0.
+If a release wrote its comment but failed to set the state, run the same command again: when the issue has no holder, the latest claim or release comment is that release (`release: <agent> ...` for `--reason`, `release: <holder> forced by <agent>: ...` for `--force`, with `<agent>` the one running it) and the issue is still in a `started` state, `release` writes no second comment, sets the state as the first run would have, says on stderr that it resumed, and exits 0. A release without `--done`, `--abandon` or `--restore` run again in the same situation has nothing left to do: it writes nothing, says so on stderr and exits 0.
 
 ### Comment, create, project, set-initiative, set-project, relate, query
 
@@ -123,7 +124,7 @@ atb linear query '{ issue(id: "ABC-123") { comments { nodes { body createdAt } }
 | Exit status | Meaning |
 |---|---|
 | 0 | Success (`claim`: the issue is yours) |
-| 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, a project with the name is archived, off the team or exists more than once, no single unarchived initiative with the name, `project set-initiative` with no project of that name, `set-project` on an issue in another project or with no single project of that name on the team, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
+| 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, `release --restore` with no `from:` state of the team to restore, a project with the name is archived, off the team or exists more than once, no single unarchived initiative with the name, `project set-initiative` with no project of that name, `set-project` on an issue in another project or with no single project of that name on the team, no state of the needed type or override, unreadable config, Linear refused a change, HTTP or GraphQL error |
 | 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`, and `relate` given the same issue twice), or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
 | 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written |
 | 4 | `release` refused: the issue has no holder (and the release is not a resume), or the holder is another agent and `--force` was not given |
@@ -146,9 +147,10 @@ States are chosen by type, not by name. Among the team's states of one type the 
 | `claim` | the first `started` state |
 | `release --done` | the first `completed` state |
 | `release --abandon` | the state named by `states.abandoned`, which must be of type `canceled`; no default |
+| `release --restore` | the state on the `from:` line of the claim that opened the hold |
 | `release` (giving up, or `--force`) | none: the state is left as it is |
 
-For `--done` and `--abandon` the state is resolved before the comment: when `release` finds no state to set (no `completed` state for `--done`), it exits 1 with nothing written, and the holder keeps the claim. A release without either sets no state, so it never fails for that reason.
+For `--done`, `--abandon` and `--restore` the state is resolved before the comment: when `release` finds no state to set (no `completed` state for `--done`, no recorded state for `--restore`), it exits 1 with nothing written, and the holder keeps the claim. A release without any of them sets no state, so it never fails for that reason.
 
 ### Configuration
 

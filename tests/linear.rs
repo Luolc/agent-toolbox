@@ -1695,6 +1695,77 @@ fn release_abandon_conflicts_with_done() {
     assert!(fake.state().requests.is_empty());
 }
 
+#[test]
+fn release_restore_sets_the_state_the_claim_opening_the_hold_recorded() {
+    for (agent, extra) in [
+        ("agent-a", &["--reason", "job ended", "--restore"][..]),
+        ("agent-b", &["--force", "stale", "--restore"][..]),
+    ] {
+        let fake = abandon_fake(None);
+        fake.state().set_states(&[
+            ("Backlog", "backlog", -1.0),
+            ("Todo", "unstarted", 0.0),
+            ("In Progress", "started", 1.0),
+        ]);
+        fake.state()
+            .add_comment(&format!("claim: {agent} thread-1\nfrom: Backlog"));
+        fake.state()
+            .add_comment(&format!("release: {agent} blocked"));
+        fake.state().add_comment(&format!(
+            "claim: {agent} thread-2\nscope: repo: src/\nfrom: Todo"
+        ));
+        // A claim run again records the state the first one set.
+        fake.state().add_comment(&format!(
+            "claim: {agent} thread-2\nscope: repo: src/\nfrom: In Progress"
+        ));
+        let output = release(&fake, extra);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(fake.comment_bodies().len(), 5);
+        assert_eq!(fake.state().issue_state, "Todo", "{extra:?}");
+        assert!(fake.first("commentCreate").unwrap() < fake.first("issueUpdate").unwrap());
+        assert!(holder_check(&fake).contains("no holder"));
+    }
+}
+
+#[test]
+fn release_restore_without_a_recorded_team_state_writes_nothing() {
+    for (claim, message) in [
+        (
+            "claim: agent-a thread-1\nscope: repo: src/",
+            "no `from:` state",
+        ),
+        (
+            "claim: agent-a thread-1\nfrom: Dropped",
+            "no state \"Dropped\"",
+        ),
+    ] {
+        let fake = abandon_fake(None);
+        fake.state().add_comment(claim);
+        let output = release(&fake, &["--reason", "job ended", "--restore"]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{claim}: {}",
+            stderr(&output)
+        );
+        assert!(stderr(&output).contains(message), "{}", stderr(&output));
+        assert_eq!(fake.mutations(), 0, "{claim}");
+        assert_eq!(fake.comment_bodies().len(), 1);
+        assert_eq!(fake.state().issue_state, "In Progress");
+        assert!(holder_check(&fake).contains("held by agent-a"));
+    }
+}
+
+#[test]
+fn release_restore_conflicts_with_done_and_abandon() {
+    for other in ["--done", "--abandon"] {
+        let fake = abandon_fake(Some(ABANDONED_CONFIG));
+        let output = release(&fake, &["--reason", "x", "--restore", other]);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(fake.state().requests.is_empty());
+    }
+}
+
 fn set_project(fake: &Fake, extra: &[&str]) -> Output {
     let mut args = vec!["set-project", ISSUE, "--project", "Project name"];
     args.extend_from_slice(extra);
@@ -1918,6 +1989,7 @@ fn an_interrupted_release_is_resumed_without_a_second_comment() {
     for (extra, end) in [
         (&["--reason", "merged", "--done"][..], "Done"),
         (&["--reason", "superseded", "--abandon"][..], "Abandoned"),
+        (&["--reason", "job ended", "--restore"][..], "Todo"),
     ] {
         let fake = abandon_fake(Some(ABANDONED_CONFIG));
         fake.state()
