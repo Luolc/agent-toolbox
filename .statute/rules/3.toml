@@ -1,0 +1,29 @@
+id = 3
+slug = "one-binary"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["simplicity"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Ship every tool in the one binary `atb`"
+
+[text.statement]
+en = "Ship every tool as a subcommand of the one Rust binary `atb`, and keep `agent-toolbox` as the name of the repository and the crate."
+
+[text.reason]
+en = '''
+Users install one binary and get every tool; the crate and repository name stay stable for those who already depend on them.
+'''
+
+[text.verification]
+en = '''
+Violated when a change adds another binary target, renames the binary, or renames the crate or the repository.
+'''

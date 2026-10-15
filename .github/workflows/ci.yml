@@ -1,8 +1,8 @@
 # PR and main check: credential scan of the new commits, then fmt / clippy /
-# test / doc, the design document length and the tests of the release
-# checks. The job name `check` is the required status check on main. A
-# release reads the result of this workflow on main (the `ci-green` job of
-# release.yml).
+# test / doc, the design document length, the tests of the release checks
+# and the statute compile check. The job name `check` is the required status
+# check on main. A release reads the result of this workflow on main (the
+# `ci-green` job of release.yml).
 
 name: CI
 
@@ -75,3 +75,29 @@ jobs:
 
       - name: Release check tests
         run: .github/scripts/release-on-main.test.sh
+
+      # AGENTS.md, statute-checks.toml and the installed skills must match a
+      # fresh compile of statute.toml and statute.lock, with the statute
+      # version that statute-checks.toml names (the one that compiled them).
+      - name: statute version
+        id: statute
+        run: |
+          version=$(sed -n 's/^statute = "\(.*\)"$/\1/p' statute-checks.toml)
+          [ -n "$version" ] || { echo "no statute version in statute-checks.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: statute cache
+        id: statute-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/statute
+          key: statute-${{ runner.os }}-${{ steps.statute.outputs.version }}
+
+      - name: install statute
+        if: steps.statute-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.statute.outputs.version }}
+        run: cargo install statute --version "$VERSION" --locked
+
+      - name: statute compile check
+        run: statute compile --check

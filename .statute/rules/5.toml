@@ -1,0 +1,29 @@
+id = 5
+slug = "vendor-credentials-for-headers"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["sensitive-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Read vendor CLI credentials only to build request headers"
+
+[text.statement]
+en = "Let `atb` read the vendor CLI credentials (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json`) only to build the headers of its requests."
+
+[text.reason]
+en = '''
+Those files hold the user's logins to other tools; reading them for anything else widens what a bug in `atb` could expose.
+'''
+
+[text.verification]
+en = '''
+Violated when a change uses a value from one of those files for anything but a request header, or writes to one of them.
+'''

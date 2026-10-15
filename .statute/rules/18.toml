@@ -1,0 +1,29 @@
+id = 18
+slug = "review-with-repository-skill"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R274"
+default = "on"
+authority = ["independent-review.another-party"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Review against the skill atb-pr-review too"
+
+[text.statement]
+en = "When you review a pull request in this repository, check it also against the skill `atb-pr-review` (`.agents/skills/atb-pr-review/SKILL.md`)."
+
+[text.reason]
+en = '''
+The skill holds the review points that only this repository has: credentials in output, daemons and retries, the shape of HTTP calls.
+'''
+
+[text.verification]
+en = '''
+Violated when a verdict on a pull request here does not go through the points of that skill.
+'''

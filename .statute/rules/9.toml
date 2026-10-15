@@ -1,0 +1,29 @@
+id = 9
+slug = "token-by-environment-only"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["sensitive-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Take a token value directly only from an environment variable"
+
+[text.statement]
+en = "Let `atb` take a token value passed directly only from an environment variable, never from a command-line flag."
+
+[text.reason]
+en = '''
+A flag lands in shell history and the process list, where other users and tools can read it.
+'''
+
+[text.verification]
+en = '''
+Violated when a change adds a flag that takes a token or key value.
+'''
