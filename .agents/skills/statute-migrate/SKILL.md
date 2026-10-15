@@ -10,7 +10,8 @@ metadata:
 The steps, in order: check the tools (step 0), read the constitution
 (a), find the rules that apply (b), take stock of how the repository
 works (c), write its own rules in one go (d), then rename the
-hand-written files, write the rule set, compile and check (e to g).
+hand-written files, write the rule set, compile, add the compile check
+to the commit hooks and CI, and check (e to g), all in one pull request.
 Questions for the person are collected in one place
 ([Questions](#questions)); ask them together, at most five at a time,
 each with its default, and go on with what they do not block.
@@ -38,13 +39,16 @@ files changes, this table is the one place to change.
 | the exclude file | `.git/info/exclude`, shared by the worktrees of a clone | no, in git's own directory |
 | the checkout hook | the file `git rev-parse --git-path hooks/post-checkout` prints, shared by the worktrees of a clone | no, in git's own directory |
 | the hook line | `[ "$3" = 1 ] && statute compile --private-only; exit 0` | in the checkout hook |
+| the merge hook | the file `git rev-parse --git-path hooks/post-merge` prints, shared by the worktrees of a clone | no, in git's own directory |
+| the merge hook line | `statute compile --private-only; exit 0` | in the merge hook |
 | a legacy copy | `<name>.legacy.md` beside the hand-written `<name>.md` it replaces, as `AGENTS.legacy.md` | yes, until the person says to delete it |
 | the constitution for agents | `constitution/<edition>/generated/constitution.<lang>.agent.md` in the first-party source | in the source |
 | the rules of a source | `rules/<id>.toml` at the top of that source, or in the directory its `rules-dir` names | in the source |
 
 ## 0. Before you start
 
-1. statute runs: `statute --version` prints a version. Run every
+1. statute runs: `statute --version` prints 0.1.4 or later, the first
+   version with `statute compile --check` (step g). Run every
    `statute` command from the directory of the rule set.
 2. The global configuration exists. Without it, `statute init` takes
    the built-in first-party source, which is enough for a public
@@ -60,7 +64,8 @@ files changes, this table is the one place to change.
    written before default switches is redone from step b: its `rules`
    and `packs` are where the three lists of step f start.
 4. The work is on a branch of its own with a clean tree, and goes
-   into the main branch the way the repository takes changes.
+   into the main branch the way the repository takes changes, as one
+   pull request (step g says why it is not split).
 5. Know whether the repository is public:
    `gh repo view <owner>/<repo> --json visibility --jq .visibility`
    prints `PUBLIC` for a public one. A public repository keeps every
@@ -173,6 +178,12 @@ which is which when you show the person the rules.
 - In a public repository, name the private source in the private rule
   set, never in the rule set, and list there the private rules it
   enables (`statute add --private`).
+- When a practice of the repository cannot hold together with a public
+  rule that a private rule requires, neither `exclude` in the rule set
+  nor the private rule set can take that rule out. A local rule that
+  `overrides` it takes its place, but only once `rules` lists it: with
+  no parent, nothing else enables it. The lasting fix is to have
+  whoever keeps the private source change it.
 
 Product: the rules, each passing the source's build check; for the
 private source, the change in the repository that holds it.
@@ -231,7 +242,9 @@ exclude = [
 
 `statute add` writes a domain to `domains` and a rule to `rules`, and
 `statute remove` writes a rule the defaults enable to `exclude`; add
-the comments afterwards. Set the parameters the mapping found in their
+the comments afterwards. A rule that a private rule requires cannot go
+in `exclude`, and the private rule set takes no `exclude`; step d says
+what to do instead. Set the parameters the mapping found in their
 tables (`[language]` and others). A `personal` parameter, the language
 an agent writes to the person in, takes the repository's value there;
 the person's own value goes into the global configuration, which in a
@@ -274,7 +287,14 @@ default, and turned off", since the rule was never on by default;
    `pre-commit install --hook-type post-checkout`, and gives the
    checkout type in `PRE_COMMIT_CHECKOUT_TYPE` instead of `$3`. The
    hook does not reach the worktrees that exist already: run `statute
-   compile --private-only` once in each of them. The private lock
+   compile --private-only` once in each of them.
+   Install the merge hook the same way, with the merge hook line, so
+   that a merge, a fast-forward of the main branch included, writes the
+   private output anew: git runs no checkout hook then, and a checkout
+   that only ever moves forward by merging, as a main checkout does,
+   would keep the private output of its first checkout, or none. With
+   pre-commit, the stage is `post-merge`, installed with `pre-commit
+   install --hook-type post-merge`. The private lock
    file lists only sources; to see which rules the private layer
    enables, read the rule ID lines of the private output.
 5. Add `statute compile --check` to the repository's commit hooks, so
@@ -295,10 +315,7 @@ default, and turned off", since the rule was never on by default;
    Then confirm CI runs it: when CI already runs every pre-commit hook,
    nothing more is needed; otherwise add a CI step that runs
    `statute compile --check`. The hook and CI run the statute version
-   that `statute-checks.toml` names, which is the one that compiled it,
-   and that version must be 0.1.4 or later, the first with the flag;
-   after upgrading statute, run `statute compile` again in the same
-   change.
+   that `statute-checks.toml` names, the one that compiled it.
 
 Acceptance, before you ask for a review:
 
@@ -313,7 +330,9 @@ Acceptance, before you ask for a review:
   copy and compare each `readlink` result with the note.
 - The compiled file's first line says statute wrote it.
 - The pull request adds the `statute compile --check` hook, and the CI
-  step too unless CI already runs every pre-commit hook.
+  step too unless CI already runs every pre-commit hook, and changes
+  nothing else in the hook and CI configuration. On the pull request,
+  CI runs `statute compile --check`, and it passes.
 - `statute check` exits 0.
 - The compiled file is compared with the legacy copies, section by
   section, against the mapping of step c: every item is where the
@@ -326,6 +345,14 @@ Acceptance, before you ask for a review:
 - In a public repository with a private output, the checkout hook holds
   the hook line, and a worktree added with `git worktree add` has the
   private output and the private links without any other command.
+- In a public repository with a private output, the merge hook holds
+  the merge hook line, and a fast-forward writes the private output:
+  in the working tree of the migration, `git switch -c merge-hook-test
+  HEAD~1`, delete the private output, `git merge --ff-only -` (back to
+  the head of the migration branch), and the private output is there
+  again; then `git switch -` and `git branch -D merge-hook-test`. git
+  runs the merge hook only when a merge moves the branch, so a merge
+  that finds nothing to do shows nothing.
 
 Commit the rule set in the same commit as the compiled file, and no
 earlier: until then it stays in the working tree, uncommitted. Some
@@ -338,7 +365,17 @@ safety rules among them.
 
 The pull request carries the rule set, the lock file, the compiled
 file, the installed skills, the checks file, the local rules, the
-legacy copies and the statute ignore file. Its
+legacy copies, the statute ignore file and the compile check in the
+commit hooks and CI, and nothing else: no other code, however small
+the fix. It is one pull request, not an instruction change and a code
+change: rule R280 has the move made in one change that holds only the
+move, the one exception to keeping instruction files apart from other
+files, since the hook and CI steps
+only check that the compiled files match their sources, and apart
+they would either leave the compiled files unchecked or check files
+that do not exist yet. R46, which R280 supersedes, has no such
+exception: a rule set that would enable R46 enables R280 in its place
+(step f). Its
 description holds the mapping, the three lists with their reasons
 and the answers to the questions.
 
