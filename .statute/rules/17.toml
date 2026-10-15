@@ -1,0 +1,29 @@
+id = 17
+slug = "clean-after-publish-dry-run"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R276"
+default = "on"
+authority = ["discriminating-checks"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Clean the crate's build before a mutation run and after a publish dry run"
+
+[text.statement]
+en = "Run `cargo clean -p agent-toolbox` before a mutation run, and before any test run that follows a `cargo publish --dry-run`."
+
+[text.reason]
+en = '''
+After `cargo publish --dry-run`, `cargo test` can run a stale binary and miss edits to the source, so a test could pass on code that is not there.
+'''
+
+[text.verification]
+en = '''
+Violated when a mutation run, or a test run after a publish dry run, is cited as evidence without `cargo clean -p agent-toolbox` before it.
+'''

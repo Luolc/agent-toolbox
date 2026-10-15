@@ -1,0 +1,29 @@
+id = 6
+slug = "no-token-in-output"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["sensitive-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep token values out of everything atb prints"
+
+[text.statement]
+en = "Let no token value appear in what `atb` prints, logs or writes into an error message; an error about a credential names its path or variable, not its content."
+
+[text.reason]
+en = '''
+The output of `atb` lands in terminals, logs and agents' context, where a token would leak.
+'''
+
+[text.verification]
+en = '''
+Violated when a code path can print, log or put into an error message a token value or a credential file's content.
+'''

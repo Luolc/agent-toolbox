@@ -1,0 +1,29 @@
+id = 1
+slug = "bounded-commands"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["simplicity"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep every atb command to local reads and a fixed, bounded set of HTTP calls"
+
+[text.statement]
+en = "Let each `atb` command only read local files and make a fixed, bounded set of HTTP calls (pagination bounded by the server's `hasNextPage` counts as bounded), with no daemon, polling or retry loop; the one retry allowed is `atb linear` fetching the key from `LINEAR_API_KEY_CMD` once more after a 401 and resending that request once."
+
+[text.reason]
+en = '''
+A command that ends on its own after a known number of calls is easy to reason about and safe to schedule. Anything that must run continuously lives in the repository that uses `atb`, as a scheduled job that calls the binary.
+'''
+
+[text.verification]
+en = '''
+Violated when a change adds to the binary a process that keeps running, a loop that polls or waits for a state, a request sent again after a failure other than that one 401 retry, or a number of HTTP calls not bounded by the command's input or by `hasNextPage`.
+'''

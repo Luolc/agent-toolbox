@@ -1,0 +1,31 @@
+id = 12
+slug = "design-one-file-cap"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R232"
+default = "on"
+authority = ["simplicity"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep the design in docs/design.md, at most 200 lines"
+
+[text.statement]
+en = "Keep the whole design in the one file `docs/design.md`, at most 200 lines long."
+
+[text.reason]
+en = '''
+One short file is read whole before a change; a cap keeps it to what a reader needs.
+'''
+
+[text.verification]
+en = '''
+`.github/scripts/design-length.sh` checks the cap, and CI's `check` job runs it.
+
+Violated when a change adds another design file, or leaves `docs/design.md` longer than 200 lines.
+'''

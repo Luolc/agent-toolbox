@@ -1,0 +1,29 @@
+id = 10
+slug = "linear-key-cache"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["sensitive-info"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Cache the Linear key only in its private file, for at most 24 hours"
+
+[text.statement]
+en = "Cache a Linear key that `atb` gets from the command in `LINEAR_API_KEY_CMD` only in `$XDG_CONFIG_HOME/linear/api-key`, with mode 0600 in a directory with mode 0700, and use the cache for at most 24 hours."
+
+[text.reason]
+en = '''
+Running the key command on every call is slow and may prompt a person; a short-lived file readable only by its owner keeps the cost of a leak small.
+'''
+
+[text.verification]
+en = '''
+Violated when the key is written anywhere else, with wider permissions, or used from the cache after 24 hours.
+'''

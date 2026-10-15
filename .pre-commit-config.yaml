@@ -1,5 +1,5 @@
-# Second-level hooks only: credential scan (gitleaks) and rustfmt. Clippy,
-# tests and docs run before push and in CI (see AGENTS.md).
+# Second-level hooks only: credential scan (gitleaks), rustfmt and the
+# statute compile check. Clippy, tests and docs run before push and in CI.
 repos:
   # Runs first: a leaked credential must be caught before any other hook
   # rewrites the staged file. Scans only the staged diff (upstream entry ends
@@ -17,4 +17,14 @@ repos:
         language: system
         entry: cargo fmt --check
         files: (\.rs$|^Cargo\.toml$|^\.?rustfmt\.toml$|^rust-toolchain\.toml$)
+        pass_filenames: false
+      # --check writes nothing: AGENTS.md, statute-checks.toml and the skills
+      # statute copies and links must match a fresh compile of statute.toml
+      # and statute.lock. The private output, which git ignores, is not
+      # compared.
+      - id: statute-compile
+        name: statute compile check
+        entry: statute compile --check
+        language: system
+        files: ^(statute(\.toml|\.lock|-checks\.toml)$|AGENTS\.md$|\.statute/|\.agents/|\.claude/)
         pass_filenames: false

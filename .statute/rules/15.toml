@@ -1,0 +1,37 @@
+id = 15
+slug = "touched-checks"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R276"
+default = "on"
+authority = ["evidence.grounds"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "The checks a change touches, by what it changes"
+
+[text.statement]
+en = '''
+The checks a change here touches, besides the commit hooks (`pre-commit run --all-files`), are:
+
+- for Rust code (`src/`, `tests/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`): `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`;
+- for `docs/design.md` or `.github/scripts/design-length.sh`: `.github/scripts/design-length.test.sh` and `.github/scripts/design-length.sh`;
+- for `.github/scripts/release-on-main.sh`: `.github/scripts/release-on-main.test.sh`.
+'''
+
+[text.reason]
+en = '''
+{@rule:R53} asks for the checks a change touches, as the project's instructions list them; this is that list.
+'''
+
+[text.verification]
+en = '''
+The commit hooks run gitleaks on the staged changes, `cargo fmt --check`, and `statute compile --check` when a statute input or output changes. CI's `check` job runs the full set, `cargo doc` with warnings denied included. When unsure whether a check is touched, it runs.
+
+Violated when a change is pushed without a check this list gives for the paths it changes having passed on the pushed version.
+'''

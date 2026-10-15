@@ -1,0 +1,29 @@
+id = 4
+slug = "no-machine-integration"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R83"
+default = "on"
+authority = ["simplicity"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "Keep machine-specific integration out of this repository"
+
+[text.statement]
+en = "Keep machine-specific integration, such as the wiring for particular machines, secret-manager references and the conventions of one workspace, out of this repository; it belongs to the repositories that use `atb`."
+
+[text.reason]
+en = '''
+This repository is public and serves any machine; what binds `atb` to one setup changes with that setup and is kept with it.
+'''
+
+[text.verification]
+en = '''
+Violated when a change adds a host name, a secret-manager reference, a path or name that only one machine or workspace has, or code that works only there.
+'''
