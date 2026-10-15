@@ -153,8 +153,8 @@ enum Command {
     /// Put an issue that is in no project into the project of its team
     /// named exactly --project, and print the identifier, project name and
     /// URL. Already in that project: printed, nothing written. In another
-    /// project, or no single unarchived project of the team with the name:
-    /// exit 1, nothing written
+    /// project: exit 1, nothing written, unless --move is given. No single
+    /// unarchived project of the team with the name: exit 1, nothing written
     SetProject {
         /// Issue identifier, such as ABC-123
         issue: String,
@@ -162,6 +162,10 @@ enum Command {
         /// unarchived projects of the issue's team
         #[arg(long, value_name = "NAME")]
         project: String,
+        /// Move an issue that is in another project, and name that project
+        /// on stderr (with --json, as `from`)
+        #[arg(long = "move")]
+        move_: bool,
         /// Print identifier, project, URL and whether it changed as JSON
         #[arg(long)]
         json: bool,
@@ -399,8 +403,9 @@ pub fn run(args: Args) -> Result<u8, Error> {
         Command::SetProject {
             issue,
             project,
+            move_,
             json,
-        } => set_project(&mut client, &issue, &project, json),
+        } => set_project(&mut client, &issue, &project, move_, json),
         Command::Relate { issue, other, json } => relate(&mut client, &issue, &other, json),
         Command::Edit {
             issue,
@@ -1536,10 +1541,16 @@ fn set_initiative(
     Ok(0)
 }
 
-/// The issue's project is set only when it has none, so this never moves an
-/// issue out of a project. Archived projects (trashed ones are archived too)
-/// do not count: Linear leaves them out unless `includeArchived` is given.
-fn set_project(client: &mut Client, ident: &str, name: &str, as_json: bool) -> Result<u8, Error> {
+/// The issue's project is set when it has none, or, with `move_`, when it
+/// is in another one. Archived projects (trashed ones are archived too) do
+/// not count: Linear leaves them out unless `includeArchived` is given.
+fn set_project(
+    client: &mut Client,
+    ident: &str,
+    name: &str,
+    move_: bool,
+    as_json: bool,
+) -> Result<u8, Error> {
     let data = client.request(
         "query($id: String!) { issue(id: $id) { id identifier team { id key } project { id name url } } }",
         json!({"id": ident}),
@@ -1581,41 +1592,55 @@ fn set_project(client: &mut Client, ident: &str, name: &str, as_json: bool) -> R
             matches.len()
         )));
     };
-    let changed = match issue["project"].as_object() {
-        None => {
-            let data = client.request(
-                "mutation($id: String!, $p: String!) { issueUpdate(id: $id, input: {projectId: $p}) { success } }",
-                json!({"id": text(issue, "/id")?, "p": project}),
-            )?;
-            if data.pointer("/issueUpdate/success") != Some(&Value::Bool(true)) {
-                return Err(usage(format!(
-                    "Linear did not put {identifier} into project {name:?}"
-                )));
-            }
-            true
-        }
+    let (changed, from) = match issue["project"].as_object() {
+        None => (true, None),
         Some(_) if text(issue, "/project/id")? == project => {
             client.note(&format!(
                 "{identifier} is already in project {name:?}; nothing written"
             ));
-            false
+            (false, None)
         }
         Some(_) => {
-            return Err(usage(format!(
-                "{identifier} is in project {:?} ({}); nothing written: \
-                 set-project does not move an issue between projects",
-                text(issue, "/project/name")?,
-                text(issue, "/project/url")?,
-            )));
+            let (from_name, from_url) = (
+                text(issue, "/project/name")?.to_owned(),
+                text(issue, "/project/url")?.to_owned(),
+            );
+            if !move_ {
+                return Err(usage(format!(
+                    "{identifier} is in project {from_name:?} ({from_url}); nothing written: \
+                     pass --move to move it into {name:?}"
+                )));
+            }
+            (true, Some((from_name, from_url)))
         }
     };
+    if changed {
+        let data = client.request(
+            "mutation($id: String!, $p: String!) { issueUpdate(id: $id, input: {projectId: $p}) { success } }",
+            json!({"id": text(issue, "/id")?, "p": project}),
+        )?;
+        if data.pointer("/issueUpdate/success") != Some(&Value::Bool(true)) {
+            return Err(usage(format!(
+                "Linear did not put {identifier} into project {name:?}"
+            )));
+        }
+    }
+    if let Some((from_name, from_url)) = &from {
+        client.note(&format!(
+            "{identifier} moved out of project {from_name:?} ({from_url})"
+        ));
+    }
     if as_json {
-        client.print_json(&json!({
+        let mut out = json!({
             "identifier": identifier,
             "project": name,
             "url": url,
             "changed": changed,
-        }));
+        });
+        if let Some((from_name, from_url)) = from {
+            out["from"] = json!({"name": from_name, "url": from_url});
+        }
+        client.print_json(&out);
     } else {
         client.print(&format!("{identifier} {name} {url}"));
     }
