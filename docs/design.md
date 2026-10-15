@@ -7,7 +7,7 @@ The current state of the code on `main`. It is edited in place, only in a design
 `atb` is one Rust binary with subcommands, each a self-contained tool. Two tools exist:
 
 - `atb quota <claude|codex|grok>` reads the subscription quota a vendor reports: window percentages and reset times. It is not a token ledger and not a bill.
-- `atb linear` claims and releases Linear issues by comment, writes comments, creates issues (also as sub-issues) and projects, edits an issue's title, description and labels, puts an issue into a project, relates two issues, and runs read-only GraphQL queries. A claim moves the issue to a `started` state; a release ends the claim and moves the issue on only when told it is done or abandoned, so an issue given up stays in progress.
+- `atb linear` claims and releases Linear issues by comment, writes comments, creates issues (also as sub-issues) and projects, edits an issue's title, description and labels, puts an issue into a project or moves it to another, relates two issues, and runs read-only GraphQL queries. A claim moves the issue to a `started` state; a release ends the claim and moves the issue on only when told it is done or abandoned, so an issue given up stays in progress.
 
 Each command reads local files or makes a fixed, bounded set of HTTP calls. There is no daemon, no polling and no retry loop. The single retry is the `atb linear` key refresh on a 401. Anything that must run continuously belongs to a consuming repository, as a scheduled job that calls this binary. The same goes for machine-specific wiring, secret-manager references and workspace conventions: none of it is in this repository.
 
@@ -66,6 +66,7 @@ Linear protocol:
 - `query` refuses a document with a mutation or subscription before the key is read or anything is sent (`query_refuses_a_mutation_before_any_request_and_passes_a_query`; scanner in `linear::document::tests`).
 - `create` adds no label unless asked; a missing label is created once (`create_without_labels_adds_none_and_looks_none_up`, `create_merges_flag_and_default_labels_and_creates_a_missing_one_once`).
 - `project create` is idempotent. One live project of the name on the team is printed and nothing written; one on another team, several, or an archived one is exit 1 with no write; a trashed one is ignored; none is created once (`project_create_creates_a_missing_project_once_and_then_prints_it`, `project_create_prints_a_project_already_on_the_team_without_writing`, `project_create_refuses_a_project_on_another_team_or_several_with_the_name`, `project_create_refuses_an_archived_project_on_any_team`, `project_create_ignores_a_trashed_project_with_the_name`).
+- `set-project` writes only for an issue in no project, or in another project with `--move`, which names the project the issue left; without `--move` that is exit 1 with no write (`set_project_refuses_an_issue_in_another_project`, `set_project_move_moves_an_issue_in_another_project_and_names_it`).
 
 Linear key:
 

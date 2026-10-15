@@ -1830,8 +1830,47 @@ fn set_project_refuses_an_issue_in_another_project() {
         "{}",
         stderr(&output)
     );
+    assert!(stderr(&output).contains("--move"), "{}", stderr(&output));
     assert_eq!(fake.mutations(), 0);
     assert_eq!(fake.state().issue_project, Some(current));
+}
+
+#[test]
+fn set_project_move_moves_an_issue_in_another_project_and_names_it() {
+    let fake = Fake::start(&[KEY]);
+    let current = fake.state().add_project("Current", &["t-1"]);
+    let id = fake.state().add_project("Project name", &["t-1"]);
+    fake.state().issue_project = Some(current.clone());
+    let output = set_project(&fake, &["--move", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "project": "Project name",
+            "url": project_url(&id), "changed": true,
+            "from": {"name": "Current", "url": project_url(&current)}})
+    );
+    assert_eq!(fake.mutations(), 1);
+    assert_eq!(fake.state().issue_project, Some(id.clone()));
+
+    let fake = Fake::start(&[KEY]);
+    let current = fake.state().add_project("Current", &["t-1"]);
+    let id = fake.state().add_project("Project name", &["t-1"]);
+    fake.state().issue_project = Some(current.clone());
+    let output = set_project(&fake, &["--move"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        format!("{ISSUE} Project name {}", project_url(&id))
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "moved out of project \"Current\" ({})",
+            project_url(&current)
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.state().issue_project, Some(id));
 }
 
 #[test]
