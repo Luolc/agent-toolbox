@@ -1,0 +1,31 @@
+id = 19
+slug = "patch-releases"
+revision = 1
+kind = "rule"
+status = "trial"
+lang = "en"
+parent = "R268"
+default = "on"
+authority = ["relaxations.project-overrides", "advance-authorization.listed-items", "advance-authorization.as-written"]
+constitution = ">=1"
+level = "project"
+check = "none"
+uses = ["instructions", "review"]
+
+[title]
+en = "A release that breaks nothing raises only the patch number, and an agent may make it"
+
+[text.statement]
+en = "When an agent judges that no change since the last release of `atb` is a breaking change, it may raise only the patch number and push that release's tag without asking a person; raising the minor or major number needs a person's yes for that version, given at the time or written down in advance."
+
+[text.reason]
+en = '''
+The owner asked for this rule. It relaxes, for this project only, the default item that {@rule:R32} adds to {@constitution:must-ask}: under {@constitution:relaxations.project-overrides} it moves a patch release whose changes the releasing agent judges free of breaking changes to {@constitution:decide-yourself}. That makes it the owner's advance authorization of one class of releases, written into this repository's instructions as {@constitution:advance-authorization.listed-items} requires; it counts only as written and within its conditions ({@constitution:advance-authorization.as-written}). A minor or major version tells the users of `atb` that something they rely on may have changed; whether that is so stays the owner's call, so the relaxation does not reach it. Pinning a version of `atb` and installing it on machines are for the repositories that pin or install it, under their own instructions.
+'''
+
+[text.verification]
+en = '''
+The version is `version` in the root `Cargo.toml`; a patch release raises only the patch number of the highest version of `atb` already released, and is made by pushing its tag, after which the release workflow creates the GitHub Release and publishes the crate. A breaking change is one after which a command, flag, output format, exit status or file location that users or scripts rely on behaves differently or is gone. An agent unsure whether a change breaks something treats it as breaking. A release outside these conditions (raising the minor or major number, or one whose changes the releasing agent did not judge free of breaking changes) needs a person's yes.
+
+Violated when a change raises the minor or major number of `atb` without a person's word for that version, when a patch release ships a change its releasing agent knew or judged to be breaking, or when a release this authorization does not cover is made without a person's yes.
+'''
