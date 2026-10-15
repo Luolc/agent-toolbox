@@ -6,7 +6,7 @@ status = "trial"
 lang = "en"
 parent = "R268"
 default = "on"
-authority = ["relaxations.project-overrides", "list-defaults.tightening", "advance-authorization.listed-items", "advance-authorization.as-written"]
+authority = ["relaxations.project-overrides", "advance-authorization.listed-items", "advance-authorization.as-written"]
 constitution = ">=1"
 level = "project"
 check = "none"
@@ -20,7 +20,7 @@ en = "When an agent judges that no change since the last release of `atb` is a b
 
 [text.reason]
 en = '''
-The owner asked for this rule. It relaxes, for this project only, the default item that {@rule:R32} adds to {@constitution:must-ask}: under {@constitution:relaxations.project-overrides} it moves a patch release whose changes the releasing agent judges free of breaking changes to {@constitution:decide-yourself}. That makes it the owner's advance authorization of one class of releases, written into this repository's instructions as {@constitution:advance-authorization.listed-items} requires; it counts only as written and within its conditions ({@constitution:advance-authorization.as-written}). A minor or major version tells the users of `atb` that something they rely on may have changed; whether that is so is the owner's call, which this rule keeps with a principal ({@constitution:list-defaults.tightening}). Pinning a version of `atb` and installing it on machines are for the repositories that pin or install it, under their own instructions.
+The owner asked for this rule. It relaxes, for this project only, the default item that {@rule:R32} adds to {@constitution:must-ask}: under {@constitution:relaxations.project-overrides} it moves a patch release whose changes the releasing agent judges free of breaking changes to {@constitution:decide-yourself}. That makes it the owner's advance authorization of one class of releases, written into this repository's instructions as {@constitution:advance-authorization.listed-items} requires; it counts only as written and within its conditions ({@constitution:advance-authorization.as-written}). A minor or major version tells the users of `atb` that something they rely on may have changed; whether that is so stays the owner's call, so the relaxation does not reach it. Pinning a version of `atb` and installing it on machines are for the repositories that pin or install it, under their own instructions.
 '''
 
 [text.verification]
