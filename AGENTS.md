@@ -221,12 +221,12 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R214 When quoting a key original such as a provision, a specification or an official definition, quote the original text rather than a translation of it, and add a summary after it where one is needed.
 - R215 Write a value that goes stale, such as a version number, a price, a policy, the behavior of an outside platform or the current state of something, into text that stays only together with the date it was read.
 - R236 When a text gives a proper noun in translation, put its original beside it at its first occurrence and at the key places; where there is no established translation or you are unsure of one, write the original alone.
-- R193 Read a principal's message as the output of speech-to-text: act on what the principal meant, not on the literal words, and take a word that plainly does not fit the context as a mistranscription, inferring from the context what the principal meant to say.
-- R194 Before using a file path, a code identifier, a command-line argument or a domain term from a principal's message, infer its most likely intended form and check its separators and case against the names that really exist in the repository and outside it.
-- R195 When you have inferred an identifier or chosen one meaning of an ambiguous term, list those guesses in your reply and ask the principal to confirm them.
 - R197 In a proposal to carry out an action and in a question to a person, write out each key parameter of the action, such as an amount, a count, a date, a target machine or a SHA, with its value.
 - R198 In steps for a person to carry out, name the machine and the interface of each step, give one action per step, write commands that run as copied, give each step its sign of completion, and give a default wherever one can be given instead of leaving the choice to the person on the spot.
 - R249 Write what you address to a person, such as replies, questions and reports, in English, whatever language their messages are in, and use it for the whole text, summaries and follow-up questions included.
+- R193 Read a principal's message as the output of speech-to-text: act on what the principal meant, not on the literal words, and take a word that plainly does not fit the context as a mistranscription, inferring from the context what the principal meant to say.
+- R194 Before using a file path, a code identifier, a command-line argument or a domain term from a principal's message, infer its most likely intended form and check its separators and case against the names that really exist in the repository and outside it.
+- R195 When you have inferred an identifier or chosen one meaning of an ambiguous term, list those guesses in your reply and ask the principal to confirm them.
 - R68 Put what is still needed after the task ends, such as a decision, knowledge to keep or work handed over to a later agent, into a repository through review, never only into a conversation.
 - R69 Never write to the cross-session memory an agent tool keeps for itself; keep a lesson that must last in a repository, through review.
 - R74 Before you write into a repository a fact you have only from someone else's account, check that it holds at its source and name in the change what you read; when it does not hold there yet, write an open item with an owner and a condition that confirms it instead of the fact.
@@ -277,6 +277,7 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R40 When you act on a relayed yes, record its reference and the result of each check in the record the action leaves.
 - R206 Put the Markdown that holds content, such as knowledge, decisions and logs, under `docs/`, put code in the directories of its languages, and keep only convention files at the root of the repository.
 - R207 Put a step-by-step runbook for manual work in `docs/knowledge/`.
+- L14 Keep no decision records, research notes or to-do list in this repository; open work is tracked outside it, and a decision and its reasons go into the pull request that makes it.
 - R19 The design states what is built in the present tense, marks a part that is planned but not built and lists what it will replace, and keeps each point not yet decided under open questions instead of stating it as settled.
 - R21 When the design is translated, keep one translation file for each original file, record in it the SHA-256 of the original it follows, keep the original's headings and anchors, and carry each change to the original into the translation in the same change.
 - R81 Change the code and the design in either order, and mark each point where they differ: the design marks a part not built yet as R19 asks, and a change to the code that runs ahead of the design says so in its description and leaves a follow-up to update the design.
@@ -286,7 +287,6 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R124 In the design, write each fact in one place and link to it from elsewhere instead of describing it again.
 - R125 In the design, give a link to another design file the text of the heading it leads to, the file's title, or both.
 - L12 Keep the whole design in the one file `docs/design.md`, at most 200 lines long.
-- L14 Keep no decision records, research notes or to-do list in this repository; open work is tracked outside it, and a decision and its reasons go into the pull request that makes it.
 - R70 Change your local main branch only by fast-forwarding it to the remote main branch; never commit on it.
 - R210 When you create a file, run `git add` on it and confirm that `git ls-files` lists it before you run checks.
 - R222 Keep work not yet pushed only on a branch other than the main branch.
