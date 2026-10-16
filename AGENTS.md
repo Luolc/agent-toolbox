@@ -203,16 +203,15 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 
 - R282 When a guard blocks you and no reviewed route is open to you, tell whoever delegated the work, an agent or a person, what blocks you, and ask for a way forward.
 - R22 To confirm that a credential is in place, test only whether it is present, and its length where that helps, and report only that status.
-- R23 To confirm that a credential works, have the program that uses it make one minimal read-only call, and report only the outcome.
 - R36 Never ask for, read or repeat a credential's value.
-- R37 When a credential shows up where it should not, treat it as leaked and report it at once.
+- R37 When a credential shows up where it should not, stop using it, never quote, copy or try it, and at once tell a principal responsible for it which credential it is, where it appeared and that it needs rotating, without its value.
 - R43 Store a credential only where the jurisdiction designates for it.
-- R44 Keep a credential out of every message, log, command line and other output.
-- R45 Never pass a credential from one agent to another, by any channel.
 - R50 Have a repository's commit hooks scan the staged changes for credentials at every commit.
-- R279 Let a credential's value reach a program only through an environment variable or a file.
-- R52 Before you push to a public repository, have a reviewer read the diff, the commit messages and the pull request text for private material, and push only the head that reviewer passed.
+- R291 Keep a credential out of every message, log, command line and other output, and never pass one from one agent to another, by any channel.
+- R292 To confirm that a credential works, have the program that uses it make one minimal read-only call, and report only the outcome.
+- R295 Let a credential's value reach a program only through an environment variable, a file or a way the secret manager itself provides of injecting it into the program.
 - R259 In a public repository's files, commit messages, pull requests, comments and reviews, write nothing that identifies or locates a private resource, a private repository, an agent instance or session, or the scope it runs in, and nothing about an agent's usage, quota, model or effort.
+- R52 Before you push to a public repository, have a reviewer read the diff, the commit messages and the pull request text for private material, and push only the head that reviewer passed.
 - R66 Give every loop that waits for something an exit for when what it waits for is gone.
 - R73 Before you start a background process that keeps holding resources, record what stops it if you are closed before you stop it yourself.
 - R199 Before starting a task, read the writing guide that the rules in force name, together with the parts it names for the language you will write in, and write all text that people read by it.
@@ -265,6 +264,9 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R233 Put `review` in a rule's `uses` only when a reviewer can decide from the diff and the pull request description alone whether the rule was broken, and `instructions` only when an agent needs to know the rule while it works.
 - R239 Write a rule's statement so that it can be read and followed on its own, as one line of the compiled instructions, resting on nothing that line does not show, such as the rule's title, reason or verification, its domain, its place in the tree or its `requires`. Name another rule in it only by a citation, never by its position, as in "the rule above" or "the other options".
 - R289 Move a trial rule to `active` only once a principal has said explicitly that it may move.
+- R290 Make what a rule requires, and the condition under which it applies, rest only on checks, counts, records and other mechanisms that already run, never on one that is still to be built.
+- R293 When a rule tells an agent to stop, pause, wait or not start some work, say in its statement what the agent does to move the work on: a route it takes itself, or what it asks of whom.
+- R298 Write the English title of a domain in the title case of The Chicago Manual of Style, keeping each product name in the form its owner writes it.
 - R42 To change instructions, skills or agent tool settings, change their source through review, never an installed copy.
 - R157 Install a project's skills only inside the project, never into a user-level skills directory.
 - R158 Do not install a skill from outside; distill its good practices into a skill of your own.
