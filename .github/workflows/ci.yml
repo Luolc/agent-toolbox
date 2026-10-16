@@ -78,13 +78,11 @@ jobs:
 
       # AGENTS.md and the installed skills must match a fresh compile of
       # statute.toml and statute.lock, with the statute version that
-      # statute.lock names (the one that compiled them). A lock written before
-      # statute 0.1.18 has no version line; its checks file has it.
+      # statute.lock names (the one that compiled them).
       - name: statute version
         id: statute
         run: |
           version=$(sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock)
-          [ -n "$version" ] || version=$(sed -n 's/^statute = "\(.*\)"$/\1/p' statute-checks.toml)
           [ -n "$version" ] || { echo "no statute version in statute.lock" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 

@@ -18,13 +18,13 @@ repos:
         entry: cargo fmt --check
         files: (\.rs$|^Cargo\.toml$|^\.?rustfmt\.toml$|^rust-toolchain\.toml$)
         pass_filenames: false
-      # --check writes nothing: AGENTS.md, statute-checks.toml and the skills
-      # statute copies and links must match a fresh compile of statute.toml
+      # --check writes nothing: AGENTS.md and the skills statute
+      # copies and links must match a fresh compile of statute.toml
       # and statute.lock. The private output, which git ignores, is not
       # compared.
       - id: statute-compile
         name: statute compile check
         entry: statute compile --check
         language: system
-        files: ^(statute(\.toml|\.lock|-checks\.toml)$|AGENTS\.md$|\.statute/|\.agents/|\.claude/)
+        files: ^(statute(\.toml|\.lock)$|AGENTS\.md$|\.statute/|\.agents/|\.claude/)
         pass_filenames: false
