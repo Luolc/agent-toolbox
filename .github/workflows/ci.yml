@@ -86,18 +86,22 @@ jobs:
           [ -n "$version" ] || { echo "no statute version in statute-checks.toml" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: statute cache
-        id: statute-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/statute
-          key: statute-${{ runner.os }}-${{ steps.statute.outputs.version }}
-
       - name: install statute
-        if: steps.statute-cache.outputs.cache-hit != 'true'
         env:
           VERSION: ${{ steps.statute.outputs.version }}
-        run: cargo install statute --version "$VERSION" --locked
+        run: |
+          target=statute-x86_64-unknown-linux-musl
+          url="https://github.com/Luolc/agent-constitution/releases/download/statute-v${VERSION}"
+          dl=$(mktemp -d)
+          curl --fail --silent --show-error --location --output "$dl/$target.tar.gz" "$url/$target.tar.gz"
+          curl --fail --silent --show-error --location --output "$dl/$target.sha256" "$url/$target.sha256"
+          (cd "$dl" && sha256sum --check --strict "$target.sha256")
+          bin="$RUNNER_TEMP/statute-bin"
+          mkdir -p "$bin" "$dl/x"
+          tar -xzf "$dl/$target.tar.gz" -C "$dl/x" statute
+          install -m 0755 "$dl/x/statute" "$bin/statute"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/statute" --version
 
       - name: statute compile check
         run: statute compile --check
