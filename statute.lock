@@ -2,7 +2,7 @@
 
 [constitution]
 git = "https://github.com/Luolc/agent-constitution"
-commit = "00a7762919570a97fc23960d78945be508baefd3"
+commit = "e3f3c7e052da46b78e111b1762feef5b3c932041"
 edition = "2026-10"
 revision = "3"
 
@@ -10,7 +10,7 @@ revision = "3"
 name = "R"
 git = "https://github.com/Luolc/agent-constitution"
 branch = "main"
-commit = "00a7762919570a97fc23960d78945be508baefd3"
+commit = "e3f3c7e052da46b78e111b1762feef5b3c932041"
 
 [[rules]]
 rule = "R1"
@@ -784,6 +784,13 @@ rule = "R298"
 revision = 2
 sha256 = "e28408dee52d411766427a30287b1c9914fcc37d530fe623a409787ffaa1ec34"
 original-sha256 = "c798dc6333dbef03bf6eb61e9b94436f6d69dd6e49ae1118f46f7e692c59d2f0"
+by = "default"
+
+[[rules]]
+rule = "R308"
+revision = 1
+sha256 = "f63ebbf4a00bb16c49ce67c7de93485a6f0219ba352f0a0a062d5db151185613"
+original-sha256 = "0fed456ef8dd2c3c51d35569db927ec1464cf0c04772c3d4470c9c1f5ae52fd9"
 by = "default"
 
 [[rules]]
