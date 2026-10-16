@@ -102,8 +102,8 @@ for departures only.
 - A rule `on` by default that the repository must not have: a rule
   whose environment it lacks (no CI, no reviewer, no shared machine)
   or that contradicts how it works on purpose.
-- A domain or rule `off` by default that it needs: Fleet when agents
-  divide work there, Writing rules (R96) when agents write or change
+- A domain or rule `off` by default that it needs: fleet (R78) when agents
+  divide work there, Writing Rules (R96) when agents write or change
   rules there, which a repository with local rules does (step d).
 - A one-of whose default child is not how the repository works.
 
@@ -159,7 +159,7 @@ repository's output only, and no other repository can name them. A
 repository may be both; this step writes only its own rules. Say
 which is which when you show the person the rules.
 
-- Write them as the rules of domain R96 (Writing rules) require: one
+- Write them as the rules of domain R96 (Writing Rules) require: one
   requirement per rule, worded so that a reviewer can decide it,
   self-contained, citing in `authority` the most specific provisions
   it refines, and new rules as trial rules. Their file format is that
@@ -179,11 +179,14 @@ which is which when you show the person the rules.
   set, never in the rule set, and list there the private rules it
   enables (`statute add --private`).
 - When a practice of the repository cannot hold together with a public
-  rule that a private rule requires, neither `exclude` in the rule set
-  nor the private rule set can take that rule out. A local rule that
-  `overrides` it takes its place, but only once `rules` lists it: with
-  no parent, nothing else enables it. The lasting fix is to have
-  whoever keeps the private source change it.
+  rule that a private rule requires, `exclude` in the rule set cannot
+  take the public rule out while the private rule is enabled: the
+  private layer fails, naming both. Turn the private rule off for this
+  repository in the private rule set, `statute remove --private
+  <rule>`, which takes it out of `rules` there or, when a default or a
+  pack enables it, writes it to `exclude` there; then the rule set can
+  exclude the public rule. When the private rule is wrong for every
+  repository, have whoever keeps the private source change it.
 
 Product: the rules, each passing the source's build check; for the
 private source, the change in the repository that holds it.
@@ -243,10 +246,12 @@ exclude = [
 `statute add` writes a domain to `domains` and a rule to `rules`, and
 `statute remove` writes a rule the defaults enable to `exclude`; add
 the comments afterwards. A rule that a private rule requires cannot go
-in `exclude`, and the private rule set takes no `exclude`; step d says
-what to do instead. Set the parameters the mapping found in their
-tables (`[language]` and others). A `personal` parameter, the language
-an agent writes to the person in, takes the repository's value there;
+in `exclude` while that private rule is enabled; step d says what to do
+instead. A rule to turn off in the private output alone goes in
+`exclude` of the private rule set, `statute remove --private <rule>`.
+Set the parameters the mapping found in their tables (`[language]` and
+others). A `personal` parameter, the language an agent writes to the
+person in, takes the repository's value there;
 the person's own value goes into the global configuration, which in a
 public repository reaches the private output only.
 
