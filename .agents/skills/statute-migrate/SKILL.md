@@ -38,11 +38,10 @@ files changes, this table is the one place to change.
 | --- | --- | --- |
 | the global configuration | `$XDG_CONFIG_HOME/statute/config.toml` (`~/.config/statute/config.toml` by default) | no, the user's home |
 | the rule set | `statute.toml` at the top of the repository | yes, in the same commit as the compiled file (step g) |
-| the lock file | `statute.lock`, next to the rule set | yes |
+| the lock file | `statute.lock`, next to the rule set; its first line, `statute = "<version>"`, names the statute that wrote it | yes |
 | the compiled file | `AGENTS.md`, next to the rule set | yes |
 | the local rules directory | `.statute/rules/` next to the rule set, or what `local-rules` in the rule set names | yes |
 | the installed skills | `.agents/skills/<name>/`, with a link `.claude/skills/<name>` | yes |
-| the checks file | `statute-checks.toml`, next to the rule set | yes |
 | the private rule set | `private.toml` in `$(git rev-parse --git-path common/statute)`, shared by the worktrees of a clone | no, in git's own directory |
 | the private lock file | `private.lock`, next to the private rule set | no, in git's own directory |
 | the private output | `.statute/AGENTS.full.md` | no, the statute ignore file lists it |
@@ -59,8 +58,8 @@ files changes, this table is the one place to change.
 
 ## 0. Before you start
 
-1. statute runs: `statute --version` prints 0.1.4 or later, the first
-   version with `statute compile --check` (step g). Run every
+1. statute runs: `statute --version` prints 0.1.18 or later, the first
+   version that records its version in the lock file (step g). Run every
    `statute` command from the directory of the rule set.
 2. The global configuration exists. Without it, `statute init` takes
    the built-in first-party source, which is enough for a public
@@ -281,7 +280,7 @@ default, and turned off", since the rule was never on by default;
 1. `statute lock`. In a public repository with private rules, it
    writes the private lock file as well.
 2. `statute compile`. It writes the compiled file, the installed
-   skills, the checks file, and with a private layer the private output
+   skills, and with a private layer the private output
    and the private links, and the statute ignore file before the files
    it lists. When it names lines to add to the exclude file or a file
    git does not ignore, fix that and run it again; it writes nothing
@@ -316,13 +315,13 @@ default, and turned off", since the rule was never on by default;
    file lists only sources; to see which rules the private layer
    enables, read the rule ID lines of the private output.
 5. Add `statute compile --check` to the repository's commit hooks, so
-   that a commit cannot leave the compiled file, the checks file or an
-   installed skill out of step with the rule set
+   that a commit cannot leave the compiled file or an installed skill
+   out of step with the rule set
    ([Compilation and the site](https://github.com/Luolc/agent-constitution/blob/main/docs/design/statute-command.md#compilation-and-the-site)).
    With pre-commit, add a local hook with `entry: statute compile
    --check`, `language: system`, `pass_filenames: false` and `files`
    matching the statute inputs and outputs (`statute.toml`,
-   `statute.lock`, `statute-checks.toml`, `AGENTS.md`, `.statute/`,
+   `statute.lock`, `AGENTS.md`, `.statute/`,
    `.agents/`, `.claude/`, and the directories of the local rules); the
    `statute-compile` hook in the
    [`.pre-commit-config.yaml` of agent-constitution](https://github.com/Luolc/agent-constitution/blob/main/.pre-commit-config.yaml)
@@ -333,7 +332,8 @@ default, and turned off", since the rule was never on by default;
    Then confirm CI runs it: when CI already runs every pre-commit hook,
    nothing more is needed; otherwise add a CI step that runs
    `statute compile --check`. The hook and CI run the statute version
-   that `statute-checks.toml` names, the one that compiled it.
+   that the first line of `statute.lock` names, the one that locked it,
+   which `sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock` prints.
 
 Acceptance, before you ask for a review:
 
@@ -382,7 +382,7 @@ is still the old one would make an agent drop those instructions, the
 safety rules among them.
 
 The pull request carries the rule set, the lock file, the compiled
-file, the installed skills, the checks file, the local rules, the
+file, the installed skills, the local rules, the
 legacy copies, the statute ignore file and the compile check in the
 commit hooks and CI, and nothing else: no other code, however small
 the fix. It is one pull request, not an instruction change and a code
