@@ -318,22 +318,34 @@ default, and turned off", since the rule was never on by default;
    that a commit cannot leave the compiled file or an installed skill
    out of step with the rule set
    ([Compilation and the site](https://github.com/Luolc/agent-constitution/blob/main/docs/design/statute-command.md#compilation-and-the-site)).
-   With pre-commit, add a local hook with `entry: statute compile
-   --check`, `language: system`, `pass_filenames: false` and `files`
-   matching the statute inputs and outputs (`statute.toml`,
-   `statute.lock`, `AGENTS.md`, `.statute/`,
-   `.agents/`, `.claude/`, and the directories of the local rules); the
-   `statute-compile` hook in the
-   [`.pre-commit-config.yaml` of agent-constitution](https://github.com/Luolc/agent-constitution/blob/main/.pre-commit-config.yaml)
-   is a model, except that its entry runs statute from source. With
-   another hook manager, add it that manager's way. With no commit
-   hooks, add only the CI step, and say so in the pull request
-   description.
+   With pre-commit, add the hook from the mirror repository, which
+   installs statute from its prebuilt wheel on PyPI:
+
+   ```yaml
+   - repo: https://github.com/Luolc/statute-pre-commit
+     rev: v<version>
+     hooks:
+       - id: statute-compile
+   ```
+
+   `<version>` is the one the `statute` line of `statute.lock` names,
+   which `sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock` prints.
+   The two must name the same version: `statute compile --check`
+   refuses a lock file another version wrote, so a `rev` out of step
+   with the lock file fails the hook. The hook's default `files` covers
+   `statute.toml`, `statute.lock`, `AGENTS.md`, `.statute/`, `.agents/`,
+   `.claude/` and `.pre-commit-config.yaml`; when the local rules or
+   another statute input or output lie elsewhere, override `files` with
+   that list plus their directories. With another hook manager, run
+   `statute compile --check` that manager's way. With no commit hooks,
+   add only the CI step, and say so in the pull request description.
    Then confirm CI runs it: when CI already runs every pre-commit hook,
    nothing more is needed; otherwise add a CI step that runs
-   `statute compile --check`. The hook and CI run the statute version
-   that the `statute` line of `statute.lock` names, the one that locked it,
-   which `sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock` prints.
+   `pre-commit run --all-files`, or only this hook with `pre-commit run
+   statute-compile --all-files`, so that CI gets statute from the same
+   `rev` and fetches no statute of its own. Without pre-commit, CI
+   installs the statute version of the lock file and runs `statute
+   compile --check`.
 
 Acceptance, before you ask for a review:
 
@@ -347,7 +359,8 @@ Acceptance, before you ask for a review:
   with `readlink`, run `statute compile`, and `cmp` each file with its
   copy and compare each `readlink` result with the note.
 - The compiled file's first line says statute wrote it.
-- The pull request adds the `statute compile --check` hook, and the CI
+- The pull request adds the `statute compile --check` hook, its `rev`
+  naming the version of `statute.lock`, and the CI
   step too unless CI already runs every pre-commit hook, and changes
   nothing else in the hook and CI configuration. On the pull request,
   CI runs `statute compile --check`, and it passes.
@@ -397,39 +410,29 @@ exception: a rule set that would enable R46 enables R280 in its place
 description holds the mapping, the three lists with their reasons
 and the answers to the questions.
 
-## Upgrading a repository moved before 0.1.18
+## Upgrading statute
 
-From statute 0.1.18 the lock file holds the version and the check
-commands that `statute-checks.toml` used to hold, and `statute compile`
-deletes a `statute-checks.toml` that statute wrote. A repository moved
-earlier changes in three places: `statute.lock` gains the `statute`
-version line and the `[[commands]]` tables, the old file goes, and CI
-reads the version from the lock file with
-`sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock` instead of from
-`statute-checks.toml`.
+To move a repository to a newer statute, run `statute lock` with the
+new version, then `statute compile`, and change `rev` of the
+`statute-compile` hook to `v<new version>`, all in one pull request:
+with the lock file and `rev` changed apart, the hook fails on the pull
+request in between. `statute lock` keeps the pinned sources and changes
+only the `statute` version line (and the `[[commands]]` tables where
+the new version records others). `statute upgrade` also moves the
+sources to newer commits, which changes the rules the repository
+follows: run it in a pull request of its own, as an instruction change,
+before or after the one that changes `rev`. The lock file is an instruction
+file under rule R280, and `.pre-commit-config.yaml` is not, so a
+repository that enables R280 first counts, in a rule of its own, a
+change to `statute.lock` that alters nothing but the `statute` version
+line and the `[[commands]]` tables as a generated file (R47) that goes
+with the change to `rev`, as agent-constitution's rule L31 does. A
+repository whose own rules keep a change of a hook's `rev` apart from
+every other change first excepts the `rev` of the `statute-compile`
+hook from them, so that it changes together with `statute.lock`.
 
-The lock file is still an instruction file in your repository (rule
-R280 counts it as one), so the upgrade usually goes in three pull
-requests, each merged before the next starts:
-
-1. CI reads the version from `statute.lock` and, when that line is not
-   there yet, falls back to `statute-checks.toml`. Nothing else
-   changes, and CI stays green on the old lock file.
-2. With the new statute, `statute upgrade` (or `statute lock`) rewrites
-   the lock file, then `statute compile` rewrites the compiled files and
-   deletes the stale `statute-checks.toml`. This is the instruction
-   change.
-3. The fallback to `statute-checks.toml` leaves CI.
-
-Acceptance, per pull request:
-
-- First: CI is green on the old lock file, and its log shows the
-  fallback to `statute-checks.toml` was used.
-- Second: `statute compile --check` exits 0 with statute 0.1.18, the CI
-  log shows 0.1.18 read from `statute.lock`, and `git ls-files` lists no
-  `statute-checks.toml`.
-- Third: the CI log still shows 0.1.18, and the workflow no longer
-  mentions `statute-checks.toml`.
+Acceptance: `statute compile --check` exits 0 with the new statute, and
+on the pull request, CI runs the hook at the new `rev`, and it passes.
 
 ## Questions
 
