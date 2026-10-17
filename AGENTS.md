@@ -297,10 +297,10 @@ A lower-ranking provision or a principal may depart from a higher-ranking provis
 - R230 When the ways of meeting a need differ only in one value filled into the same sentence, write one rule that names a parameter for that value; when they differ in the requirement itself, write a one-of whose options are each a complete rule. Write no condition on a parameter's value into a rule's text.
 - R233 Put `review` in a rule's `uses` only when a reviewer can decide from the diff and the pull request description alone whether the rule was broken, and `instructions` only when an agent needs to know the rule while it works.
 - R239 Write a rule's statement so that it can be read and followed on its own, as one line of the compiled instructions, resting on nothing that line does not show, such as the rule's title, reason or verification, its domain, its place in the tree or its `requires`. Name another rule in it only by a citation, never by its position, as in "the rule above" or "the other options".
-- R289 Move a trial rule to `active` only once a principal has said explicitly that it may move.
 - R290 Make what a rule requires, and the condition under which it applies, rest only on checks, counts, records and other mechanisms that already run, never on one that is still to be built.
 - R293 When a rule tells an agent to stop, pause, wait or not start some work, say in its statement what the agent does to move the work on: a route it takes itself, or what it asks of whom.
 - R331 Write the English in every domain title, whatever language the title is in, in Chicago title case, and each product name as its owner writes it.
+- R333 Move a trial rule to `active` only once a principal has said explicitly that it may move, or once it has passed a process for the move that a principal set out in advance.
 
 ## Agents
 
