@@ -399,14 +399,11 @@ file, the installed skills, the local rules, the
 legacy copies, the statute ignore file and the compile check in the
 commit hooks and CI, and nothing else: no other code, however small
 the fix. It is one pull request, not an instruction change and a code
-change: rule R280 has the move made in one change that holds only the
-move, the one exception to keeping instruction files apart from other
-files, since the hook and CI steps
-only check that the compiled files match their sources, and apart
-they would either leave the compiled files unchecked or check files
-that do not exist yet. R46, which R280 supersedes, has no such
-exception: a rule set that would enable R46 enables R280 in its place
-(step f). Its
+change: under rule R334 the hook and CI steps that run statute are
+part of the instruction system and change with it, and R334 has this
+pull request add the compile check. R46 and R280, which R334
+supersedes in turn, do not count those steps so: a rule set that
+would enable either enables R334 in its place (step f). Its
 description holds the mapping, the three lists with their reasons
 and the answers to the questions.
 
@@ -421,12 +418,9 @@ only the `statute` version line (and the `[[commands]]` tables where
 the new version records others). `statute upgrade` also moves the
 sources to newer commits, which changes the rules the repository
 follows: run it in a pull request of its own, as an instruction change,
-before or after the one that changes `rev`. The lock file is an instruction
-file under rule R280, and `.pre-commit-config.yaml` is not, so a
-repository that enables R280 first counts, in a rule of its own, a
-change to `statute.lock` that alters nothing but the `statute` version
-line and the `[[commands]]` tables as a generated file (R47) that goes
-with the change to `rev`, as agent-constitution's rule L31 does. A
+before or after the one that changes `rev`. Under rule R334 the lock
+file and the `rev` of the `statute-compile` hook are both part of the
+instruction system, so the pull request is an instruction change. A
 repository whose own rules keep a change of a hook's `rev` apart from
 every other change first excepts the `rev` of the `statute-compile`
 hook from them, so that it changes together with `statute.lock`.
