@@ -18,13 +18,12 @@ repos:
         entry: cargo fmt --check
         files: (\.rs$|^Cargo\.toml$|^\.?rustfmt\.toml$|^rust-toolchain\.toml$)
         pass_filenames: false
-      # --check writes nothing: AGENTS.md and the skills statute
-      # copies and links must match a fresh compile of statute.toml
-      # and statute.lock. The private output, which git ignores, is not
-      # compared.
+  # --check writes nothing: AGENTS.md and the skills statute copies and links
+  # must match a fresh compile of statute.toml and statute.lock. The private
+  # output, which git ignores, is not compared. The mirror installs statute
+  # from PyPI at the version of `rev`, which must be the version statute.lock
+  # names: when they differ, statute refuses the lock and the hook fails.
+  - repo: https://github.com/Luolc/statute-pre-commit
+    rev: v0.1.19
+    hooks:
       - id: statute-compile
-        name: statute compile check
-        entry: statute compile --check
-        language: system
-        files: ^(statute(\.toml|\.lock)$|AGENTS\.md$|\.statute/|\.agents/|\.claude/)
-        pass_filenames: false

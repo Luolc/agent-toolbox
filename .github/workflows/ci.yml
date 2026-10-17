@@ -1,8 +1,8 @@
 # PR and main check: credential scan of the new commits, then fmt / clippy /
 # test / doc, the design document length, the tests of the release checks
-# and the statute compile check. The job name `check` is the required status
-# check on main. A release reads the result of this workflow on main (the
-# `ci-green` job of release.yml).
+# and the statute compile check, run as its pre-commit hook. The job name
+# `check` is the required status check on main. A release reads the result
+# of this workflow on main (the `ci-green` job of release.yml).
 
 name: CI
 
@@ -18,6 +18,9 @@ concurrency:
   # run.
   group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  PRE_COMMIT_VERSION: 4.6.2
 
 permissions:
   contents: read
@@ -77,31 +80,9 @@ jobs:
         run: .github/scripts/release-on-main.test.sh
 
       # AGENTS.md and the installed skills must match a fresh compile of
-      # statute.toml and statute.lock, with the statute version that
-      # statute.lock names (the one that compiled them).
-      - name: statute version
-        id: statute
-        run: |
-          version=$(sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock)
-          [ -n "$version" ] || { echo "no statute version in statute.lock" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: install statute
-        env:
-          VERSION: ${{ steps.statute.outputs.version }}
-        run: |
-          target=statute-x86_64-unknown-linux-musl
-          url="https://github.com/Luolc/agent-constitution/releases/download/statute-v${VERSION}"
-          dl=$(mktemp -d)
-          curl --fail --silent --show-error --location --output "$dl/$target.tar.gz" "$url/$target.tar.gz"
-          curl --fail --silent --show-error --location --output "$dl/$target.sha256" "$url/$target.sha256"
-          (cd "$dl" && sha256sum --check --strict "$target.sha256")
-          bin="$RUNNER_TEMP/statute-bin"
-          mkdir -p "$bin" "$dl/x"
-          tar -xzf "$dl/$target.tar.gz" -C "$dl/x" statute
-          install -m 0755 "$dl/x/statute" "$bin/statute"
-          echo "$bin" >> "$GITHUB_PATH"
-          "$bin/statute" --version
-
+      # statute.toml and statute.lock. The hook installs statute at the `rev`
+      # of .pre-commit-config.yaml, and statute fails when statute.lock was
+      # written by another version, so this step also checks that the two
+      # agree.
       - name: statute compile check
-        run: statute compile --check
+        run: pipx run "pre-commit==${PRE_COMMIT_VERSION}" run statute-compile --all-files
