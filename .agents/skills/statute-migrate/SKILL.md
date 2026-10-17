@@ -38,7 +38,7 @@ files changes, this table is the one place to change.
 | --- | --- | --- |
 | the global configuration | `$XDG_CONFIG_HOME/statute/config.toml` (`~/.config/statute/config.toml` by default) | no, the user's home |
 | the rule set | `statute.toml` at the top of the repository | yes, in the same commit as the compiled file (step g) |
-| the lock file | `statute.lock`, next to the rule set; its first line, `statute = "<version>"`, names the statute that wrote it | yes |
+| the lock file | `statute.lock`, next to the rule set; its `statute = "<version>"` line, the first key after the header comment, names the statute that wrote it | yes |
 | the compiled file | `AGENTS.md`, next to the rule set | yes |
 | the local rules directory | `.statute/rules/` next to the rule set, or what `local-rules` in the rule set names | yes |
 | the installed skills | `.agents/skills/<name>/`, with a link `.claude/skills/<name>` | yes |
@@ -332,7 +332,7 @@ default, and turned off", since the rule was never on by default;
    Then confirm CI runs it: when CI already runs every pre-commit hook,
    nothing more is needed; otherwise add a CI step that runs
    `statute compile --check`. The hook and CI run the statute version
-   that the first line of `statute.lock` names, the one that locked it,
+   that the `statute` line of `statute.lock` names, the one that locked it,
    which `sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock` prints.
 
 Acceptance, before you ask for a review:
@@ -396,6 +396,40 @@ exception: a rule set that would enable R46 enables R280 in its place
 (step f). Its
 description holds the mapping, the three lists with their reasons
 and the answers to the questions.
+
+## Upgrading a repository moved before 0.1.18
+
+From statute 0.1.18 the lock file holds the version and the check
+commands that `statute-checks.toml` used to hold, and `statute compile`
+deletes a `statute-checks.toml` that statute wrote. A repository moved
+earlier changes in three places: `statute.lock` gains the `statute`
+version line and the `[[commands]]` tables, the old file goes, and CI
+reads the version from the lock file with
+`sed -n 's/^statute = "\(.*\)"$/\1/p' statute.lock` instead of from
+`statute-checks.toml`.
+
+The lock file is still an instruction file in your repository (rule
+R280 counts it as one), so the upgrade usually goes in three pull
+requests, each merged before the next starts:
+
+1. CI reads the version from `statute.lock` and, when that line is not
+   there yet, falls back to `statute-checks.toml`. Nothing else
+   changes, and CI stays green on the old lock file.
+2. With the new statute, `statute upgrade` (or `statute lock`) rewrites
+   the lock file, then `statute compile` rewrites the compiled files and
+   deletes the stale `statute-checks.toml`. This is the instruction
+   change.
+3. The fallback to `statute-checks.toml` leaves CI.
+
+Acceptance, per pull request:
+
+- First: CI is green on the old lock file, and its log shows the
+  fallback to `statute-checks.toml` was used.
+- Second: `statute compile --check` exits 0 with statute 0.1.18, the CI
+  log shows 0.1.18 read from `statute.lock`, and `git ls-files` lists no
+  `statute-checks.toml`.
+- Third: the CI log still shows 0.1.18, and the workflow no longer
+  mentions `statute-checks.toml`.
 
 ## Questions
 
