@@ -24,6 +24,6 @@ repos:
   # from PyPI at the version of `rev`, which must be the version statute.lock
   # names: when they differ, statute refuses the lock and the hook fails.
   - repo: https://github.com/Luolc/statute-pre-commit
-    rev: v0.1.23
+    rev: v0.1.25
     hooks:
       - id: statute-compile
