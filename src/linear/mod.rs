@@ -45,7 +45,8 @@ Key sources, highest first:
 An empty variable counts as unset. LINEAR_API_URL overrides the endpoint.
 
 States are chosen by type: the first `started` state (lowest position, then
-name) for claim, the first `completed` for release --done. The optional
+name) for claim, the first `completed` for release --done. edit --state
+takes a state by its exact name, never one of type `started`. The optional
 config file $XDG_CONFIG_HOME/linear/config.json, beside the key cache, holds
 {\"states\": {\"<type>\": \"<state name>\", ...}, \"default_labels\": [...]}:
 the state to use for a type instead of the first, and labels create adds.
@@ -54,7 +55,8 @@ which must be of type `canceled`; without that entry it is an error. release
 --restore sets the state on the `from:` line of the claim that opened the
 hold: the holder's first claim after its last release.
 
-Exit status: 0 on success, 1 on error, 2 on a usage error (including a
+Exit status: 0 on success, 1 on error (including edit --state naming a
+state the team does not have or a `started` one), 2 on a usage error (including a
 comment body that is empty or starts with `claim:` or `release:`, and relate
 given the same issue twice) or when
 Linear answers 429 (the retry-after value is printed; nothing is retried), 3
@@ -184,14 +186,15 @@ enum Command {
         json: bool,
     },
     /// Set the issue's title to --title, replace its description with the
-    /// file's content, verbatim, add and remove the labels named, and print
-    /// its identifier and URL. Only the fields that differ are sent, and
-    /// labels not named stay. Every field already as given (the description
-    /// apart from trailing newlines, a label to add already on the issue, a
-    /// label to remove not on it): printed, nothing written. An empty title,
-    /// description or label name, a label both added and removed, or more
-    /// than 50 distinct label names, is refused (exit 2) before anything is
-    /// sent
+    /// file's content, verbatim, add and remove the labels named, set its
+    /// state to --state, and print its identifier and URL. Only the fields
+    /// that differ are sent, and labels not named stay. Every field already
+    /// as given (the description apart from trailing newlines, a label to add
+    /// already on the issue, a label to remove not on it): printed, nothing
+    /// written. An empty title, description or label name, a label both added
+    /// and removed, or more than 50 distinct label names, is refused (exit 2)
+    /// before anything is sent. A state the team does not have, or one of
+    /// type `started`, is refused (exit 1) with nothing written
     #[command(group = clap::ArgGroup::new("change").required(true).multiple(true))]
     Edit {
         /// Issue identifier, such as ABC-123
@@ -209,6 +212,10 @@ enum Command {
         /// A label to remove, matched exactly; repeatable
         #[arg(long = "remove-label", value_name = "NAME", group = "change")]
         remove_labels: Vec<String>,
+        /// The name of a state of the issue's team, matched exactly; not one
+        /// of type `started`, which only claim sets
+        #[arg(long, value_name = "NAME", group = "change")]
+        state: Option<String>,
         /// Print identifier, URL and whether it changed as JSON
         #[arg(long)]
         json: bool,
@@ -412,6 +419,7 @@ pub fn run(args: Args) -> Result<u8, Error> {
             title,
             mut add_labels,
             mut remove_labels,
+            state,
             json,
             ..
         } => {
@@ -419,15 +427,14 @@ pub fn run(args: Args) -> Result<u8, Error> {
                 let mut seen = std::collections::HashSet::new();
                 labels.retain(|label| seen.insert(label.clone()));
             }
-            edit(
-                &mut client,
-                &issue,
-                title.as_deref(),
-                description.as_deref(),
-                &add_labels,
-                &remove_labels,
-                json,
-            )
+            let change = Change {
+                title: title.as_deref(),
+                description: description.as_deref(),
+                add_labels: &add_labels,
+                remove_labels: &remove_labels,
+                state: state.as_deref(),
+            };
+            edit(&mut client, &issue, &change, json)
         }
         Command::Project {
             command:
@@ -559,24 +566,33 @@ fn edit_input(
     Ok(Ok(Some(description)))
 }
 
+/// What one `edit` asks for, each field as given.
+struct Change<'a> {
+    title: Option<&'a str>,
+    description: Option<&'a str>,
+    add_labels: &'a [String],
+    remove_labels: &'a [String],
+    state: Option<&'a str>,
+}
+
 /// One `issueUpdate` with only the fields that differ from the issue's, and
 /// none when every field given already holds its value (descriptions compared
 /// without trailing newlines). Labels go by id in `addedLabelIds` and
 /// `removedLabelIds`, never as a whole list, so a label someone else changes
-/// meanwhile stays changed.
-fn edit(
-    client: &mut Client,
-    ident: &str,
-    title: Option<&str>,
-    description: Option<&str>,
-    add_labels: &[String],
-    remove_labels: &[String],
-    as_json: bool,
-) -> Result<u8, Error> {
+/// meanwhile stays changed. The state is matched by name among the team's
+/// states, read in the same request as the issue.
+fn edit(client: &mut Client, ident: &str, change: &Change, as_json: bool) -> Result<u8, Error> {
+    let Change {
+        title,
+        description,
+        add_labels,
+        remove_labels,
+        state,
+    } = *change;
     let names: Vec<&String> = add_labels.iter().chain(remove_labels).collect();
     let data = client.request(
-        "query($id: String!, $l: Boolean!, $n: [String!], $first: Int!) { issue(id: $id) { id identifier url title description team { id } labels(first: $first, filter: {name: {in: $n}}) @include(if: $l) { nodes { id name } } } }",
-        json!({"id": ident, "l": !names.is_empty(), "n": names, "first": MAX_EDIT_LABELS}),
+        "query($id: String!, $l: Boolean!, $n: [String!], $first: Int!, $s: Boolean!) { issue(id: $id) { id identifier url title description state @include(if: $s) { id } team { id states @include(if: $s) { nodes { id name type } } } labels(first: $first, filter: {name: {in: $n}}) @include(if: $l) { nodes { id name } } } }",
+        json!({"id": ident, "l": !names.is_empty(), "n": names, "first": MAX_EDIT_LABELS, "s": state.is_some()}),
     )?;
     let issue = &data["issue"];
     if issue.is_null() {
@@ -584,6 +600,11 @@ fn edit(
     }
     let identifier = text(issue, "/identifier")?.to_owned();
     let url = text(issue, "/url")?.to_owned();
+    // Checked before any label is created, so a refused state writes nothing.
+    let state_id = match state {
+        Some(name) => Some(edit_state(issue, &identifier, name)?),
+        None => None,
+    };
     // (id, name) of the issue's labels; names compare exactly, whatever the
     // filter matched.
     let current: Vec<(&str, &str)> = issue
@@ -626,6 +647,9 @@ fn edit(
             .collect::<Result<Vec<_>, _>>()?;
         input.insert("addedLabelIds".to_owned(), json!(ids));
     }
+    if let Some(id) = state_id.filter(|id| issue.pointer("/state/id") != Some(&json!(id))) {
+        input.insert("stateId".to_owned(), id.into());
+    }
     let changed = !input.is_empty();
     if changed {
         let data = client.request(
@@ -640,6 +664,7 @@ fn edit(
             (title.is_some(), "title"),
             (description.is_some(), "description"),
             (!names.is_empty(), "labels"),
+            (state.is_some(), "state"),
         ]
         .into_iter()
         .filter_map(|(given, field)| given.then_some(field))
@@ -655,6 +680,31 @@ fn edit(
         client.print(&format!("{identifier} {url}"));
     }
     Ok(0)
+}
+
+/// The id of the team's state named exactly `name`, or an error naming the
+/// states there are: none of that name, or one of type `started`, which is
+/// claim's to set, so that no issue shows in progress without a holder.
+fn edit_state(issue: &Value, identifier: &str, name: &str) -> Result<String, Error> {
+    let states: Vec<&Value> = issue
+        .pointer("/team/states/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect();
+    let Some(state) = states.iter().find(|s| s["name"] == name) else {
+        let names: Vec<&str> = states.iter().filter_map(|s| s["name"].as_str()).collect();
+        return Err(usage(format!(
+            "the team of {identifier} has no state named {name:?} (states: {}); nothing written",
+            names.join(", ")
+        )));
+    };
+    if state["type"] == STARTED {
+        return Err(usage(format!(
+            "{name:?} is a started state; use `atb linear claim` to start {identifier}; nothing written"
+        )));
+    }
+    Ok(text(state, "/id")?.to_owned())
 }
 
 fn write_comment(client: &mut Client, ident: &str, body: &str, as_json: bool) -> Result<u8, Error> {
