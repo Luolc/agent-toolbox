@@ -245,6 +245,9 @@ impl State {
             if let Some(description) = input["description"].as_str() {
                 self.issue_description = Some(description.to_owned());
             }
+            if let Some(id) = input["stateId"].as_str() {
+                self.issue_state = self.states.iter().find(|s| s.0 == id).unwrap().1.clone();
+            }
             assert!(
                 input.get("labelIds").is_none(),
                 "a whole label list: {input}"
@@ -377,15 +380,14 @@ impl State {
                     json!({"id": id, "name": name, "type": kind, "position": position})
                 })
                 .collect();
-            let kind = &self
+            let (state_id, _, kind, _) = self
                 .states
                 .iter()
                 .find(|s| s.1 == self.issue_state)
-                .unwrap()
-                .2;
+                .unwrap();
             let mut issue = json!({"id": "i-1", "identifier": ISSUE, "url": ISSUE_URL,
                 "title": self.issue_title, "description": self.issue_description,
-                "state": {"name": self.issue_state, "type": kind}, "project": project,
+                "state": {"id": state_id, "name": self.issue_state, "type": kind}, "project": project,
                 "team": {"id": "t-1", "key": "TEAM", "states": {"nodes": states}}});
             if query.contains("labels(") && vars["l"] == true {
                 // Names matched ignoring case as a collation might: atb must
@@ -2471,4 +2473,69 @@ fn edit_of_a_missing_issue_changes_no_label() {
     );
     assert_eq!(fake.mutations(), 0);
     assert_eq!(fake.first("issueLabels"), None);
+}
+
+#[test]
+fn edit_state_sets_the_named_state_and_then_writes_nothing() {
+    let fake = Fake::start(&[KEY]);
+    let output = edit(&fake, &["--state", "Done"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{ISSUE} {ISSUE_URL}\n"));
+    assert_eq!(edits(&fake), [json!({"stateId": "s-Done"})]);
+    assert_eq!(fake.state().issue_state, "Done");
+
+    let output = edit(&fake, &["--state", "Done", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("already has the given state; nothing written"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"identifier": ISSUE, "url": ISSUE_URL, "changed": false})
+    );
+    assert_eq!(fake.mutations(), 1);
+}
+
+#[test]
+fn edit_state_refuses_a_missing_or_started_state_and_writes_nothing() {
+    let fake = labelled_fake();
+    // `done` is not `Done`: names compare exactly.
+    let output = edit(&fake, &["--state", "done", "--add-label", "new"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(
+            "has no state named \"done\" (states: Backlog, Todo, In Progress, Done, Canceled)"
+        ),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = edit(&fake, &["--state", "In Progress", "--title", "T"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("use `atb linear claim`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
+    assert_eq!(fake.state().issue_state, "Todo");
+}
+
+#[test]
+fn edit_sends_a_title_and_a_state_in_one_write() {
+    let fake = Fake::start(&[KEY]);
+    let output = edit(&fake, &["--title", "T", "--state", "Canceled"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        edits(&fake),
+        [json!({"title": "T", "stateId": "s-Canceled"})]
+    );
+
+    // A state already in place is left out of a title change.
+    let fake = Fake::start(&[KEY]);
+    let output = edit(&fake, &["--title", "T", "--state", "Todo"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(edits(&fake), [json!({"title": "T"})]);
 }
