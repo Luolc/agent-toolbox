@@ -34,7 +34,21 @@ struct Request {
     variables: Value,
 }
 
+/// How the fake answers a read of an issue's comments.
+#[derive(Clone, Copy)]
+enum CommentRead {
+    Full,
+    /// Every comment but the latest, as a read that has not caught up with
+    /// the last write would.
+    Stale,
+    /// This status line, with a GraphQL error.
+    Failing(&'static str),
+    /// `comments: null` and no error.
+    NoList,
+}
+
 struct State {
+    comment_read: CommentRead,
     /// Keys answered normally; any other key gets a 401.
     accepted: Vec<String>,
     /// From this many requests on, every key gets a 401.
@@ -284,16 +298,21 @@ impl State {
             let url = format!("https://linear.example/comment/{id}");
             json!({"commentCreate": {"success": true, "comment": {"id": id, "url": url}}})
         } else if query.contains("comments(") {
+            let visible = match self.comment_read {
+                CommentRead::NoList => return json!({"issue": {"comments": null}}),
+                CommentRead::Stale => self.comments.len().saturating_sub(1),
+                _ => self.comments.len(),
+            };
             // Pages of two, so every read-back with more than two comments
             // walks the pagination.
             let start: usize = vars["after"].as_str().map_or(0, |c| c.parse().unwrap());
-            let end = (start + 2).min(self.comments.len());
+            let end = (start + 2).min(visible);
             let nodes: Vec<Value> = self.comments[start..end]
                 .iter()
                 .map(|(id, at, body)| json!({"id": id, "createdAt": at, "body": body}))
                 .collect();
             json!({"issue": {"comments": {"nodes": nodes, "pageInfo": {
-                "hasNextPage": end < self.comments.len(),
+                "hasNextPage": end < visible,
                 "endCursor": end.to_string(),
             }}}})
         } else if query.contains("issueLabelCreate") {
@@ -429,6 +448,7 @@ impl Fake {
         let port = listener.local_addr().unwrap().port();
         let url = format!("http://127.0.0.1:{port}/graphql");
         let mut state = State {
+            comment_read: CommentRead::Full,
             accepted: accepted.iter().map(|k| (*k).to_owned()).collect(),
             revoke_after: usize::MAX,
             failing_state_updates: 0,
@@ -546,7 +566,13 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
             query: query.clone(),
             variables: body["variables"].clone(),
         });
-        if accepted && query.contains("stateId") && state.failing_state_updates > 0 {
+        let failing_read = match state.comment_read {
+            CommentRead::Failing(status) if query.contains("comments(") => Some(status),
+            _ => None,
+        };
+        if let (true, Some(status)) = (accepted, failing_read) {
+            (status, json!({"errors": [{"message": "Read failed"}]}))
+        } else if accepted && query.contains("stateId") && state.failing_state_updates > 0 {
             state.failing_state_updates -= 1;
             (
                 "503 Service Unavailable",
@@ -777,6 +803,79 @@ fn claim_after_another_agents_unreleased_claim_loses() {
     let bodies = fake.comment_bodies();
     assert_eq!(bodies.len(), 4);
     assert_eq!(bodies[3], "release: agent-a lost");
+}
+
+/// A claim whose read-back is answered as `read`: exit 5 with the claim
+/// comment written, the state started, and nothing more written.
+fn unchecked_claim(read: CommentRead, earlier: &[&str]) -> String {
+    let fake = Fake::start(&[KEY]);
+    {
+        let mut state = fake.state();
+        for body in earlier {
+            state.add_comment(body);
+        }
+        state.comment_read = read;
+    }
+    let output = claim(&fake, "agent-a");
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "the claim comment on ABC-123 was written, but the conflict check did not finish"
+        ),
+        "{err}"
+    );
+    let bodies = fake.comment_bodies();
+    assert_eq!(bodies.len(), earlier.len() + 1, "{bodies:?}");
+    assert!(bodies.last().unwrap().starts_with("claim: agent-a "));
+    assert_eq!(fake.state_updates(), 1);
+    assert_eq!(fake.state().issue_state, "In Progress");
+    assert_eq!(stdout(&output), "");
+    err
+}
+
+#[test]
+fn claim_whose_read_back_lacks_its_comment_exits_5_and_writes_nothing_more() {
+    let err = unchecked_claim(CommentRead::Stale, &[]);
+    assert!(
+        err.contains("missing from the read-back of 0 comments"),
+        "{err}"
+    );
+    // An earlier claim in sight does not make an unchecked claim lose.
+    let err = unchecked_claim(CommentRead::Stale, &["claim: agent-b thread-2"]);
+    assert!(
+        err.contains("missing from the read-back of 1 comment"),
+        "{err}"
+    );
+}
+
+#[test]
+fn claim_whose_read_back_fails_exits_5_and_writes_nothing_more() {
+    let err = unchecked_claim(CommentRead::Failing("503 Service Unavailable"), &[]);
+    assert!(err.contains("Read failed"), "{err}");
+    let err = unchecked_claim(CommentRead::Failing("429 Too Many Requests"), &[]);
+    assert!(err.contains("rate limited"), "{err}");
+    let err = unchecked_claim(CommentRead::NoList, &[]);
+    assert!(err.contains("no /issue/comments/nodes"), "{err}");
+}
+
+#[test]
+fn release_whose_read_back_has_no_comment_list_is_an_error_not_no_holder() {
+    let fake = Fake::start(&[KEY]);
+    {
+        let mut state = fake.state();
+        state.issue_state = "In Progress".into();
+        state.add_comment("claim: agent-a thread-1\nfrom: Todo");
+        state.comment_read = CommentRead::NoList;
+    }
+    let output = release(&fake, &["--reason", "merged"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no /issue/comments/nodes"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.mutations(), 0);
 }
 
 #[test]

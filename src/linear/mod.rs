@@ -23,6 +23,9 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const EXIT_CLAIM_LOST: u8 = 3;
 pub const EXIT_RELEASE_REFUSED: u8 = 4;
+/// The claim comment was written but the conflict check did not finish: the
+/// claim stands unchecked, neither won nor lost.
+pub const EXIT_CLAIM_UNCHECKED: u8 = 5;
 /// A comment body or an edit refused before the key is read, as for a usage
 /// error.
 const EXIT_BODY_REFUSED: u8 = 2;
@@ -61,7 +64,10 @@ comment body that is empty or starts with `claim:` or `release:`, and relate
 given the same issue twice) or when
 Linear answers 429 (the retry-after value is printed; nothing is retried), 3
 when a claim lost to an earlier claim, 4 when a release was refused (no
-holder, or the holder is another agent). A release run again after it wrote
+holder, or the holder is another agent), 5 when a claim wrote its comment
+but the conflict check did not finish (the read-back failed, a 429
+included, or lacked the new comment): the comment stands, the issue is in
+the started state and nothing more is written. A release run again after it wrote
 its comment but failed to set the state writes no second comment and only
 sets the state, if the issue has no holder, this agent's release is the
 latest claim or release comment and the state is still `started`.";
@@ -77,7 +83,8 @@ pub struct Args {
 enum Command {
     /// Set the issue to the first started state and write a claim comment
     /// that records the prior state; exit 3 if an earlier claim by another
-    /// agent is still held
+    /// agent is still held, 5 if the comment was written but the conflict
+    /// check did not finish
     Claim {
         /// Issue identifier, such as ABC-123
         issue: String,
@@ -303,7 +310,7 @@ enum ProjectCommand {
     },
 }
 
-/// The exit status on success or on a protocol outcome (3, 4).
+/// The exit status on success or on a protocol outcome (3, 4, 5).
 pub fn run(args: Args) -> Result<u8, Error> {
     let ctx = Context::from_process(None);
     // The query is checked before the key is read: a refused write must not
@@ -910,7 +917,12 @@ fn comments(client: &mut Client, issue: &Issue) -> Result<Vec<Comment>, Error> {
             json!({"id": issue.id, "after": after}),
         )?;
         let page = &data["issue"]["comments"];
-        for node in page["nodes"].as_array().into_iter().flatten() {
+        // A missing list is not an empty one: read as empty, it would show
+        // an issue with no holder.
+        let nodes = page["nodes"]
+            .as_array()
+            .ok_or_else(|| usage("unexpected Linear response: no /issue/comments/nodes"))?;
+        for node in nodes {
             all.push(Comment {
                 id: text(node, "/id")?.to_owned(),
                 created_at: text(node, "/createdAt")?.to_owned(),
@@ -1024,18 +1036,29 @@ fn claim(
         ),
     )?;
     let checked = comments(client, &issue).and_then(|all| {
-        let winner = earlier_claim(&all, &mine, agent).map(str::to_owned);
         if all.iter().all(|c| c.id != mine) {
-            return Err(usage("the claim comment is missing from the read-back"));
+            let plural = if all.len() == 1 { "" } else { "s" };
+            return Err(usage(format!(
+                "the claim comment is missing from the read-back of {} comment{plural}",
+                all.len()
+            )));
         }
-        Ok(winner)
+        Ok(earlier_claim(&all, &mine, agent).map(str::to_owned))
     });
-    let winner = checked.inspect_err(|_| {
-        client.note(&format!(
-            "note: the claim comment on {} was written, but the conflict check did not finish",
-            issue.identifier
-        ));
-    })?;
+    let winner = match checked {
+        Ok(winner) => winner,
+        // Without a complete read-back there is no telling whether the
+        // claim won; `lost` or a state change could undo a claim that did.
+        Err(err) => {
+            client.note(&format!("error: {err}"));
+            client.note(&format!(
+                "note: the claim comment on {} was written, but the conflict check did not \
+                 finish; nothing more written, state left {:?}",
+                issue.identifier, started.name
+            ));
+            return Ok(EXIT_CLAIM_UNCHECKED);
+        }
+    };
     if let Some(winner) = winner {
         comment(client, &issue, &format!("release: {agent} lost"))?;
         client.note(&format!(

@@ -93,7 +93,7 @@ atb linear query '{ viewer { id } }'
 
 `claim` sets the issue to the team's first `started` state, then writes one comment: line 1 `claim: <agent> <source>` (the source is a thread key or the name of the dispatching agent), line 2 `scope: <repo>: <paths>`, line 3 `from: <state>`, the state the issue was in before, which `release --restore` sets again. After writing it, `claim` reads back every comment, ordered by `createdAt`, then by comment id. If an earlier `claim:` by another agent has no later `release:` by that agent, the earlier claim wins: `claim` writes `release: <agent> lost` and exits 3. An earlier claim by the same agent is not a conflict. This is not a lock: two agents can still claim within the same moment, and the work then shows as a merge conflict on a pull request.
 
-The current holder is the agent named in the latest `claim:` comment that has no later `release:` comment by the same agent. `release: <agent> lost`, `release: <agent> abandoned: ...` and `release: <agent> forced by ...` count as releases by `<agent>`. With no such claim the issue has no holder. If a `claim` fails after its comment was written but before the conflict check finished, it says so on stderr; run it again or release it.
+The current holder is the agent named in the latest `claim:` comment that has no later `release:` comment by the same agent. `release: <agent> lost`, `release: <agent> abandoned: ...` and `release: <agent> forced by ...` count as releases by `<agent>`. With no such claim the issue has no holder. If `claim` wrote its comment but could not finish the conflict check, because the read-back failed (a 429 included), came back without a comment list, or lacked the new comment, it exits 5: the claim stands unchecked, neither won nor lost. The issue stays in the `started` state, nothing more is written (no `release: <agent> lost`), and stderr gives the cause and says the comment on the issue was written. Running `claim` again checks it, since an earlier claim by the same agent is not a conflict; `release` ends it.
 
 ### Release
 
@@ -127,9 +127,10 @@ atb linear query '{ issue(id: "ABC-123") { comments { nodes { body createdAt } }
 |---|---|
 | 0 | Success (`claim`: the issue is yours) |
 | 1 | Error: no key, issue or parent not found, comment file unreadable, `release --abandon` without a configured canceled state, `release --restore` with no `from:` state of the team to restore, a project with the name is archived, off the team or exists more than once, no single unarchived initiative with the name, `project set-initiative` with no project of that name, `set-project` on an issue in another project without `--move` or with no single project of that name on the team, no state of the needed type or override, `edit --state` naming a state the team does not have or a `started` one, unreadable config, Linear refused a change, HTTP or GraphQL error |
-| 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`, and `relate` given the same issue twice), or Linear answered 429 (the `retry-after` value is printed; nothing is retried) |
+| 2 | Usage error (including a `comment` body that is empty or starts with `claim:` or `release:`, and `relate` given the same issue twice), or Linear answered 429 (the `retry-after` value is printed; nothing is retried), except for `claim`'s read-back (exit 5) |
 | 3 | `claim` lost to an earlier claim; `release: <agent> lost` is written |
 | 4 | `release` refused: the issue has no holder (and the release is not a resume), or the holder is another agent and `--force` was not given |
+| 5 | `claim` wrote its comment but did not finish the conflict check (the read-back failed or lacked the comment); nothing more is written and the state stays `started` |
 
 ### API key
 
