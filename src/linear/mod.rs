@@ -43,8 +43,11 @@ Key sources, highest first:
      as a secret manager's read. Its trimmed stdout is cached for 24 hours in
      $XDG_CONFIG_HOME/linear/api-key (default <home>/.config/linear/api-key,
      where ATB_HOME overrides the home), mode 0600 in a 0700 directory. Its
-     stderr is discarded. On a 401 the command runs once more and the request
-     is retried once; a second 401 is an error.
+     stderr is discarded. From 20 hours on the command runs to replace the
+     cache; if it fails, the cached key is used until 24 hours. After a
+     failure the command is not run again for 10 minutes. On a 401 the
+     command runs once more and the request is retried once; a second 401 is
+     an error.
 An empty variable counts as unset. LINEAR_API_URL overrides the endpoint.
 
 States are chosen by type: the first `started` state (lowest position, then

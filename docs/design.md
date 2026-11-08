@@ -71,7 +71,8 @@ Linear protocol:
 
 Linear key:
 
-- A key from `LINEAR_API_KEY_CMD` is cached in a 0600 file inside a 0700 directory, and a fresh cache is used without running the command (`key_command_without_a_cache_runs_once_and_writes_a_private_cache`, `a_fresh_cache_is_used_without_running_the_command`). The 24-hour expiry is untested.
+- A key from `LINEAR_API_KEY_CMD` is cached in a 0600 file inside a 0700 directory, and a fresh cache is used without running the command (`key_command_without_a_cache_runs_once_and_writes_a_private_cache`, `a_fresh_cache_is_used_without_running_the_command`). Freshness is the file's mtime. From 20 hours the command replaces the cache; if it fails, the cache is used until 24 hours and not after (`a_cache_older_than_twenty_hours_is_replaced_by_the_commands_key`, `a_cache_older_than_twenty_hours_is_used_when_the_command_fails`, `a_cache_older_than_twenty_four_hours_is_not_used_when_the_command_fails`).
+- A failure of the command touches `api-key.failed` beside the cache, and for 10 minutes after it the command is not run, the 401 refresh included; a success removes it (`a_failing_key_command_is_not_run_again_for_ten_minutes`, `a_401_within_ten_minutes_of_a_failure_does_not_run_the_command`, `a_failing_refresh_after_a_401_marks_the_failure`, `a_success_of_the_key_command_removes_the_failure_mark`).
 - A 401 on a cached key refetches once and retries once; a second 401 is an error; a run refreshes at most once (`a_401_on_a_cached_key_refetches_once_and_retries_once`, `a_second_401_is_an_error`, `a_run_refreshes_the_key_at_most_once`).
 
 Release:
@@ -97,7 +98,7 @@ Repository:
 - That a trashed project comes back from `projects` only with `includeArchived: true` is assumed from the schema and untested against a real workspace (PR #7).
 - A claim's read-back once came back without the comment just written. Pagination, ordering and filtering are ruled out for that case; a read that had not caught up with the write, or a response without a comment list, remain. Which one it was is unknown; the exit-5 message now tells them apart.
 - If a losing claimant crashed before writing its `lost` line, `holder` names the later claimant while `claim`'s conflict check favours the earlier one (PR #5).
-- Three invariants in section 3 have no test: the quota request rules, the Codex 429 exception and the release guard; the 24-hour key expiry is also untested.
+- Three invariants in section 3 have no test: the quota request rules, the Codex 429 exception and the release guard.
 - `edit` reads an issue's labels through `labels(filter: {name: {in: …}}) @include(if: …)`, taken from Linear's public schema and untested against a real workspace.
 - The Codex `User-Agent` follows the upstream client's source and was not compared with a captured request (PR #1).
 - Open work is tracked in Linear, not here.
