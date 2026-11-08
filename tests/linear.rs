@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 
@@ -988,8 +989,26 @@ impl KeyCommand {
         Self { home, counter }
     }
 
+    /// One whose command fails: `cat` finds no key file.
+    fn failing(name: &str) -> Self {
+        let cmd = Self::new(name, "");
+        fs::remove_file(cmd.home.join("key")).unwrap();
+        cmd
+    }
+
     fn cache(&self) -> PathBuf {
         self.home.join(".config/linear/api-key")
+    }
+
+    fn failure_mark(&self) -> PathBuf {
+        self.home.join(".config/linear/api-key.failed")
+    }
+
+    /// A cache holding `key`, last written `age` ago.
+    fn write_cache(&self, key: &str, age: Duration) {
+        fs::create_dir_all(self.cache().parent().unwrap()).unwrap();
+        fs::write(self.cache(), key).unwrap();
+        set_age(&self.cache(), age);
     }
 
     fn runs(&self) -> usize {
@@ -1021,6 +1040,14 @@ fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+fn set_age(path: &Path, age: Duration) {
+    let file = fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(SystemTime::now() - age).unwrap();
+}
+
+const HOUR: Duration = Duration::from_secs(60 * 60);
+const MINUTE: Duration = Duration::from_secs(60);
+
 #[test]
 fn key_command_without_a_cache_runs_once_and_writes_a_private_cache() {
     let fake = Fake::start(&[KEY]);
@@ -1046,6 +1073,120 @@ fn a_fresh_cache_is_used_without_running_the_command() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({"viewer": {"id": "u-1"}})
     );
+}
+
+#[test]
+fn a_cache_older_than_twenty_hours_is_replaced_by_the_commands_key() {
+    let fake = Fake::start(&[NEW_KEY]);
+    let cmd = KeyCommand::new("key-cache-refresh", NEW_KEY);
+    cmd.write_cache(KEY, 21 * HOUR);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(cmd.runs(), 1);
+    assert_eq!(fake.state().requests[0].auth, NEW_KEY);
+    assert_eq!(fs::read_to_string(cmd.cache()).unwrap(), NEW_KEY);
+}
+
+#[test]
+fn a_cache_older_than_twenty_hours_is_used_when_the_command_fails() {
+    let fake = Fake::start(&[KEY]);
+    let cmd = KeyCommand::failing("key-cache-stale-fallback");
+    cmd.write_cache(KEY, 21 * HOUR);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(cmd.runs(), 1);
+    assert!(
+        stderr(&output).contains("using the cached key, which expires in 2h59m"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fake.state().requests[0].auth, KEY);
+    assert!(cmd.failure_mark().exists());
+}
+
+#[test]
+fn a_cache_older_than_twenty_four_hours_is_not_used_when_the_command_fails() {
+    let fake = Fake::start(&[KEY]);
+    let cmd = KeyCommand::failing("key-cache-expired");
+    cmd.write_cache(KEY, 25 * HOUR);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("LINEAR_API_KEY_CMD failed"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(cmd.runs(), 1);
+    assert!(fake.state().requests.is_empty());
+}
+
+#[test]
+fn a_failing_key_command_is_not_run_again_for_ten_minutes() {
+    let fake = Fake::start(&[KEY]);
+    let cmd = KeyCommand::failing("key-failure-backoff");
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(cmd.runs(), 1);
+    assert_eq!(fs::read(cmd.failure_mark()).unwrap(), b"");
+    assert_eq!(mode(&cmd.failure_mark()), 0o600);
+
+    set_age(&cmd.failure_mark(), 4 * MINUTE);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(cmd.runs(), 1);
+    let err = stderr(&output);
+    assert!(
+        err.contains("failed 4m0") && err.contains("it runs again in 5m"),
+        "{err}"
+    );
+
+    set_age(&cmd.failure_mark(), 11 * MINUTE);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(cmd.runs(), 2);
+    assert!(fake.state().requests.is_empty());
+}
+
+#[test]
+fn a_success_of_the_key_command_removes_the_failure_mark() {
+    let fake = Fake::start(&[KEY]);
+    let cmd = KeyCommand::new("key-failure-cleared", KEY);
+    fs::create_dir_all(cmd.cache().parent().unwrap()).unwrap();
+    fs::write(cmd.failure_mark(), "").unwrap();
+    set_age(&cmd.failure_mark(), 11 * MINUTE);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(cmd.runs(), 1);
+    assert!(!cmd.failure_mark().exists());
+}
+
+#[test]
+fn a_401_within_ten_minutes_of_a_failure_does_not_run_the_command() {
+    let fake = Fake::start(&[NEW_KEY]);
+    let cmd = KeyCommand::new("key-401-backoff", NEW_KEY);
+    cmd.write_cache(KEY, HOUR);
+    fs::write(cmd.failure_mark(), "").unwrap();
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("HTTP 401"), "{}", stderr(&output));
+    assert_eq!(cmd.runs(), 0);
+    assert_eq!(fake.state().requests.len(), 1);
+}
+
+#[test]
+fn a_failing_refresh_after_a_401_marks_the_failure() {
+    let fake = Fake::start(&[]);
+    let cmd = KeyCommand::failing("key-401-refresh-fails");
+    cmd.write_cache(KEY, HOUR);
+    let output = cmd.query(&fake);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("LINEAR_API_KEY_CMD failed"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(cmd.runs(), 1);
+    assert!(cmd.failure_mark().exists());
 }
 
 #[test]
